@@ -1,0 +1,25 @@
+{
+  "CLICKUP_TEAM_ID": "90141106373",
+  "CLICKUP_SPACE_ID": "90145135194",
+  "CLICKUP_FOLDER_ID": "90148650103",
+  "CLICKUP_LIST_TICKETS_ID": "901415529323",
+  "CLICKUP_LIST_MERCHANTS_ID": "901415529324",
+  "FIELD_IDS_TICKETS": {
+    "Source": "cce340eb-1ad3-4393-99db-8a4479a4adf8",
+    "Merchant": "a1748265-3769-4961-8a97-68f4c790b5ee",
+    "MID": "6b12ba3e-96a6-4068-9eaa-1cba547558ce",
+    "Category": "98e62955-2751-45ed-a00a-4d8889e0c09e",
+    "Priority Level": "aaae7c35-5cbf-4325-be9c-d358b5654ab8",
+    "Channel": "688d4913-337f-4f97-bada-3653dcee743c"
+  },
+  "FIELD_IDS_MERCHANTS": {
+    "MID": "6b12ba3e-96a6-4068-9eaa-1cba547558ce",
+    "Phone": "67b7f5f3-2ebb-4b64-9d3f-f87c0a09b4bb",
+    "Email": "3bed8782-7ba5-4012-a813-da4aab163737",
+    "Business Type": "74587b52-8dd0-4b65-83b7-c6c110caa6a9",
+    "Address": "7887abc2-2960-49fb-9d6c-3f600430b800",
+    "Unique Code": "be7d8b56-8466-4328-aee8-08ea04cb8295",
+    "Telegram ID": "48e0b107-75f9-41b4-beb6-cecc0e9d9b0d",
+    "Contact Name": "a1e9331d-feaa-4e33-97d6-9de70848de6a"
+  }
+}

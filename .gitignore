@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+clickup_ids.json
+merchant_codes.json
+codes_for_sending.txt
+*.log
