@@ -128,7 +128,6 @@ def search_merchant_by_code(code: str) -> dict | None:
                         logger.info(f"Мерчант найден: {task['name']} (код: {code})")
                         return extract_merchant_data(task)
 
-        # ClickUp отдаёт до 100 задач на страницу
         if len(tasks) < 100:
             break
         page += 1
@@ -198,7 +197,6 @@ def extract_merchant_data(task: dict) -> dict:
 
 def save_telegram_id_to_merchant(task_id: str, telegram_id: int, field_ids: dict = None):
     """Сохраняет Telegram ID в карточку мерчанта в ClickUp."""
-    # Получаем задачу чтобы найти field ID
     r = requests.get(f"{CLICKUP_BASE}/task/{task_id}", headers=CLICKUP_HEADERS)
     if r.status_code != 200:
         return False
@@ -223,11 +221,10 @@ def save_telegram_id_to_merchant(task_id: str, telegram_id: int, field_ids: dict
 
 
 def create_support_ticket(merchant: dict, message: str, ai_analysis: dict) -> str | None:
-    """Создаёт тикет поддержки в ClickUp с авто-назначением на наименее загруженного агента."""
+    """Создаёт тикет поддержки в ClickUp."""
     priority_map = {"Urgent": 1, "High": 2, "Normal": 3, "Low": 4}
     priority = priority_map.get(ai_analysis.get("priority", "Normal"), 3)
 
-    # Определяем наименее загруженного агента
     assigned_agent = get_least_loaded_agent()
 
     task_name = f"[{ai_analysis.get('category', 'Other')}] {merchant['name']} — {message[:60]}"
@@ -286,7 +283,9 @@ MID: {merchant['mid']}
 Тип бизнеса: {merchant.get('business_type', 'Ресторан')}
 
 ПРАВИЛА:
-- Отвечай на языке мерчанта (русский или английский)
+- Определи язык мерчанта и отвечай ТОЛЬКО на том же языке.
+- Поддерживаемые языки: русский, таджикский, узбекский, арабский, испанский, английский.
+- Понимай уличный/разговорный стиль — сленг, смешанный язык (рунглиш, тажрус, арабский с латиницей).
 - ОТВЕЧАЙ СРАЗУ если простой вопрос о Clover/Tekcard с уверенностью >85%
 - ЭСКАЛИРУЙ если: чарджбеки, закрытие аккаунта, изменение ставок, возвраты >$500, фрод/PCI вопросы, что-то неясное
 - НИКОГДА не делись данными других мерчантов
@@ -311,7 +310,6 @@ MID: {merchant['mid']}
             messages=[{"role": "user", "content": message}]
         )
         text = response.content[0].text.strip()
-        # Убираем markdown если Claude обернул в ```json
         if text.startswith("```"):
             text = text.split("```")[1]
             if text.startswith("json"):
@@ -344,8 +342,6 @@ MID: {merchant['mid']}
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start — приветствие."""
     telegram_id = update.effective_user.id
-
-    # Проверяем — уже идентифицирован?
     merchant = merchant_cache.get(telegram_id) or search_merchant_by_telegram_id(telegram_id)
 
     if merchant:
@@ -372,22 +368,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_text = update.message.text.strip()
     state = user_states.get(telegram_id, "unknown")
 
-    # ── Состояние: ожидаем код ─────────────────────────────────────────────────────
     if state == "awaiting_code":
         code = message_text.upper().strip()
-
         await update.message.reply_text("🔍 Проверяю код...")
-
         merchant = search_merchant_by_code(code)
 
         if merchant:
-            # Сохраняем Telegram ID в ClickUp
             saved = save_telegram_id_to_merchant(merchant["task_id"], telegram_id)
-
             merchant["telegram_id"] = str(telegram_id)
             merchant_cache[telegram_id] = merchant
             user_states[telegram_id] = "identified"
-
             await update.message.reply_text(
                 f"✅ *Идентификация успешна!*\n\n"
                 f"Добро пожаловать, *{merchant['name']}*!\n"
@@ -404,9 +394,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ── Состояние: не идентифицирован ───────────────────────────────────────────
     if state not in ("identified",):
-        # Проверяем в ClickUp (на случай перезапуска бота)
         merchant = search_merchant_by_telegram_id(telegram_id)
         if merchant:
             merchant_cache[telegram_id] = merchant
@@ -419,7 +407,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # ── Состояние: идентифицирован — обрабатываем запрос ──────────────────────────────────
     merchant = merchant_cache.get(telegram_id)
     if not merchant:
         merchant = search_merchant_by_telegram_id(telegram_id)
@@ -429,24 +416,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         merchant_cache[telegram_id] = merchant
 
-    # Показываем что обрабатываем
     await update.message.reply_text("⏳ Обрабатываю запрос...")
 
-    # Анализируем через Claude
     analysis = analyze_with_claude(merchant, message_text)
     logger.info(
         f"[{merchant['name']}] confidence={analysis['confidence']} "
         f"escalate={analysis['should_escalate']} category={analysis['category']}"
     )
 
-    # Решение: отвечать или эскалировать
     if not analysis["should_escalate"] and analysis["confidence"] >= 85:
-        # Отвечаем напрямую
         await update.message.reply_text(analysis["response_to_merchant"])
     else:
-        # Создаём тикет в ClickUp
         ticket_id = create_support_ticket(merchant, message_text, analysis)
-
         if ticket_id:
             await update.message.reply_text(
                 "✅ *Ваш запрос принят!*\n\n"
