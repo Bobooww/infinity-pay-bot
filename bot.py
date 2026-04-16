@@ -1048,7 +1048,7 @@ async def check_ticket_updates(context: ContextTypes.DEFAULT_TYPE):
                              f"{'Bash вопрос решён Если нужно что-то ещё — напишите.' if 'close' in status_name or 'complete' in status_name else 'Наш специалист работает над вашим вопросом.'}",
                         parse_mode="Markdown"
                     )
-                    faqfaq_cache[cache_key] = {"answer": "", "hits": 0, "last_used": time.time()}
+                    faq_cache[cache_key] = {"answer": "", "hits": 0, "last_used": time.time()}
 
                     # Уведомляем в группу
                     if SUPPORT_GROUP_CHAT_ID:
