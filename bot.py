@@ -1347,13 +1347,22 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("🎙 Распознаю голосовое...")
     text = await transcribe_voice(update, context)
-    if text:
-        await update.message.reply_text(f"📝 Распознано: _{text}_", parse_mode="Markdown")
-        # Обрабатываем как текстовое сообщение
-        update.message.text = text
-        await handle_message(update, context)
-    else:
+    if not text:
         await update.message.reply_text("❌ Не удалось распознать голосовое. Попробуйте текстом.")
+        return
+
+    await update.message.reply_text(f"📝 Распознано: _{text}_", parse_mode="Markdown")
+
+    # Роутинг по роли — НЕ мутируем update.message.text (frozen в PTB v20)
+    if tg_id in agent_sessions:
+        await handle_agent_message(update, context, text)
+    else:
+        # Для мерчанта: мутируем через object.__setattr__ (обходит _frozen)
+        try:
+            object.__setattr__(update.message, "text", text)
+        except Exception as e:
+            logger.warning(f"Could not set message.text: {e}")
+        await handle_message(update, context)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1626,12 +1635,18 @@ pending_agent_tasks = {}  # tg_id -> {"task_data": {...}, "step": "phone", "crea
 AGENT_AI_PROMPT = """Ты умный ассистент Infinity Pay Inc. (ISO, процессор Tekcard, POS Clover).
 Сотрудник пишет сообщение. Проанализируй ГЛУБОКО и извлеки данные.
 
+ВАЖНО: сотрудник может описать НЕСКОЛЬКО задач для РАЗНЫХ мерчантов в одном сообщении
+(особенно в голосовых). Раздели их на отдельные задачи — одну на мерчанта/проблему.
+
 ОБЯЗАТЕЛЬНО определи:
 1. intent — "task" если описывает проблему/задачу/просьбу, "question" если вопрос, "other"
-2. merchant_name — ТОЧНОЕ название мерчанта как написал сотрудник (оригинал, не переводи), иначе "Не указан"
-3. task_title — CLEAN ENGLISH title (max 70 chars). ВСЕГДА на английском, даже если сотрудник писал на русском/таджикском/узбекском.
-4. task_description — DETAILED ENGLISH description (2-4 sentences) что нужно сделать саппорту. ТОЛЬКО АНГЛИЙСКИЙ.
-5. priority — определи по словам-маркерам:
+2. tasks — МАССИВ задач. Каждая задача это объект с полями:
+   - merchant_name: ТОЧНОЕ название мерчанта как написал сотрудник (оригинал), иначе "Не указан"
+   - task_title: CLEAN ENGLISH title (max 70 chars). ВСЕГДА на английском.
+   - task_description: DETAILED ENGLISH description (2-4 sentences).
+   - priority: 1|2|3|4 (см. ниже)
+   - category: одна из списка
+3. priority — определи по словам-маркерам:
    • 1 = URGENT 🔴 — прямо сейчас, бизнес стоит: "срочно", "сейчас", "asap", "urgent",
      "не работает совсем", "терминал умер", "не могу принимать", "горит", "немедленно",
      "сегодня нужно", "fraud", "chargeback сегодня", "закрыли аккаунт"
@@ -1641,18 +1656,26 @@ AGENT_AI_PROMPT = """Ты умный ассистент Infinity Pay Inc. (ISO, 
      "изменить меню/цены", "настроить", "подключить", "вопрос по", "как сделать" (по умолчанию)
    • 4 = LOW 🟢 — не срочно: "когда будет время", "на днях", "не горит", "на следующей неделе",
      "по возможности", "fyi", "справка", "на потом"
-6. category — одна из: Clover POS, Фото/Меню, Документы, Транзакции, Тех.проблема, Обновление данных, Биллинг, Оборудование, Другое
-7. answer — ответ если question/other (на языке сотрудника)
+Категории: Clover POS, Фото/Меню, Документы, Транзакции, Тех.проблема, Обновление данных, Биллинг, Оборудование, Другое
+4. answer — ответ если intent="question" или "other" (на языке сотрудника)
 
 Примеры:
+
 "Нужно поменять пару фоток у Iflowers срочно"
-→ {"intent":"task","merchant_name":"Iflowers","task_title":"Replace photos in Clover POS menu","task_description":"Merchant Iflowers needs to replace several menu photos in their Clover POS. Urgent — contact merchant to get new photos and upload via Inventory.","priority":1,"category":"Фото/Меню","answer":""}
+→ {"intent":"task","tasks":[{"merchant_name":"Iflowers","task_title":"Replace photos in Clover POS menu","task_description":"Merchant Iflowers needs to replace several menu photos in Clover POS. Urgent — contact merchant to get new photos and upload via Inventory.","priority":1,"category":"Фото/Меню"}],"answer":""}
 
-"У Pizza Palace не проходят транзакции"
-→ {"intent":"task","merchant_name":"Pizza Palace","task_title":"Transactions not going through","task_description":"Merchant Pizza Palace reports transactions failing. Need to diagnose processing: check terminal connection, Tekcard gateway status, and recent declines in the portal.","priority":1,"category":"Транзакции","answer":""}
+"У Pizza Palace не проходят транзакции и у BGI обнови адрес когда будет время"
+→ {"intent":"task","tasks":[
+    {"merchant_name":"Pizza Palace","task_title":"Transactions not going through","task_description":"Merchant Pizza Palace reports transactions failing. Need to diagnose processing: check terminal connection, Tekcard gateway status, and recent declines.","priority":1,"category":"Транзакции"},
+    {"merchant_name":"BGI","task_title":"Update merchant address on file","task_description":"Non-urgent — update address for merchant BGI. Contact merchant for new address and update in MPA system.","priority":4,"category":"Обновление данных"}
+],"answer":""}
 
-"когда будет время обнови адрес у BGI"
-→ {"intent":"task","merchant_name":"BGI","task_title":"Update merchant address on file","task_description":"Non-urgent request to update address for merchant BGI. Contact merchant for new address and update in MPA system.","priority":4,"category":"Обновление данных","answer":""}
+"Нужно поменять цены на пловхаус, а потом нужно узнать, почему принтер не работает в Nomads ресторан и какие-то вопросы у Taco Food. Открою три разные тикеты"
+→ {"intent":"task","tasks":[
+    {"merchant_name":"Plove House","task_title":"Update menu prices in Clover POS","task_description":"Merchant Plove House needs menu price updates in Clover POS. Contact merchant to collect new price list, then update via Inventory.","priority":3,"category":"Фото/Меню"},
+    {"merchant_name":"Nomads","task_title":"Printer not working at terminal","task_description":"Merchant Nomads reports their receipt printer is not working. Need to diagnose: check cable, paper roll, and pairing with Clover device. Dispatch tech if hardware fault.","priority":2,"category":"Оборудование"},
+    {"merchant_name":"Taco Food","task_title":"General inquiry — needs clarification","task_description":"Merchant Taco Food has questions (content not specified by agent). Agent to follow up with merchant to clarify specific questions and route to correct team.","priority":3,"category":"Другое"}
+],"answer":""}
 
 Ответь ТОЛЬКО JSON без markdown."""
 
@@ -2053,7 +2076,7 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         resp = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=600,
+            max_tokens=1500,  # больше для массива задач
             system=AGENT_AI_PROMPT,
             messages=[{"role": "user", "content": f"Сотрудник ({agent['name']}) написал: {text}"}]
         )
@@ -2063,76 +2086,128 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
         intent = data.get("intent", "other")
 
         if intent == "task":
-            merchant = data.get("merchant_name", "Не указан")
-            title = data.get("task_title", text[:60])
+            # Поддержка и нового формата (tasks array), и старого (плоский объект)
+            tasks = data.get("tasks")
+            if not tasks:
+                # Обратная совместимость — оборачиваем плоский в массив
+                tasks = [{
+                    "merchant_name":    data.get("merchant_name", "Не указан"),
+                    "task_title":       data.get("task_title", text[:60]),
+                    "task_description": data.get("task_description", ""),
+                    "priority":         data.get("priority", 3),
+                    "category":         data.get("category", "Другое"),
+                }]
 
             priority_map = {1: "🔥 Urgent", 2: "🟠 High", 3: "🟡 Normal", 4: "🟢 Low"}
-            p = data.get("priority", 3)
 
-            # ── Поиск мерчанта в базе ClickUp ───────────────────────────
-            resolved = None
-            candidates = []
-            if merchant and merchant.lower() not in ("не указан", "unknown", ""):
-                try:
-                    candidates = search_merchants_by_name(merchant, limit=5)
-                except Exception as e:
-                    logger.error(f"search_merchants_by_name error: {e}")
-                    candidates = []
+            # ─── Одна задача — интерактивный флоу (как раньше) ──────────
+            if len(tasks) == 1:
+                task = tasks[0]
+                merchant = task.get("merchant_name", "Не указан")
+                title    = task.get("task_title", text[:60])
+                p        = task.get("priority", 3)
 
-            if len(candidates) == 1:
-                resolved = candidates[0]
-                data["merchant_name"] = resolved["name"]
+                resolved = None
+                candidates = []
+                if merchant and merchant.lower() not in ("не указан", "unknown", ""):
+                    try:
+                        candidates = search_merchants_by_name(merchant, limit=5)
+                    except Exception as e:
+                        logger.error(f"search_merchants_by_name error: {e}")
+                        candidates = []
 
-            pending_agent_tasks[tg_id] = {
-                "task_data": data,
-                "candidates": candidates,
-                "resolved_merchant": resolved,
-                "created_at": time.time(),
-                "step": "phone" if (resolved is not None or not candidates) else "pick_merchant",
-            }
+                if len(candidates) == 1:
+                    resolved = candidates[0]
+                    task["merchant_name"] = resolved["name"]
 
-            # Несколько кандидатов — просим выбрать
-            if len(candidates) > 1:
-                names_list = "\n".join(
-                    f"{i+1}. *{c['name']}* — MID: `{c.get('mid') or '—'}`, код: `{c.get('unique_code') or '—'}`"
-                    for i, c in enumerate(candidates)
-                )
+                pending_agent_tasks[tg_id] = {
+                    "task_data": task,
+                    "candidates": candidates,
+                    "resolved_merchant": resolved,
+                    "created_at": time.time(),
+                    "step": "phone" if (resolved is not None or not candidates) else "pick_merchant",
+                }
+
+                if len(candidates) > 1:
+                    names_list = "\n".join(
+                        f"{i+1}. *{c['name']}* — MID: `{c.get('mid') or '—'}`, код: `{c.get('unique_code') or '—'}`"
+                        for i, c in enumerate(candidates)
+                    )
+                    await update.message.reply_text(
+                        f"📋 *Новая задача:* {title}\n"
+                        f"⚡ {priority_map.get(p, '🟡 Normal')}  📂 {task.get('category', 'Другое')}\n\n"
+                        f"🔎 По запросу *{merchant}* найдено {len(candidates)} мерчантов:\n\n"
+                        f"{names_list}\n\n"
+                        f"Напишите *номер* (1-{len(candidates)}) или *0* чтобы без привязки.",
+                        parse_mode="Markdown"
+                    )
+                    return
+
+                if resolved:
+                    info_block = (
+                        f"✅ Найден: *{resolved['name']}*\n"
+                        f"🆔 MID: `{resolved.get('mid') or '—'}`\n"
+                        f"🔑 Код: `{resolved.get('unique_code') or '—'}`\n"
+                    )
+                elif merchant and merchant.lower() not in ("не указан", "unknown", ""):
+                    info_block = (
+                        f"⚠️ Мерчант *{merchant}* не найден в базе.\n"
+                        f"Задача будет создана с этим именем, без MID/кода.\n"
+                    )
+                else:
+                    info_block = f"🏪 Мерчант: *{merchant}*\n"
+
                 await update.message.reply_text(
-                    f"📋 *Новая задача:* {title}\n"
-                    f"⚡ {priority_map.get(p, '🟡 Normal')}  📂 {data.get('category', 'Другое')}\n\n"
-                    f"🔎 По запросу *{merchant}* найдено {len(candidates)} мерчантов:\n\n"
-                    f"{names_list}\n\n"
-                    f"Напишите *номер* нужного мерчанта (1-{len(candidates)}) или *0* чтобы создать без привязки.",
+                    f"📋 *Новая задача:*\n\n"
+                    f"📝 {title}\n"
+                    f"{info_block}"
+                    f"⚡ Приоритет: {priority_map.get(p, '🟡 Normal')}\n"
+                    f"📂 Категория: {task.get('category', 'Другое')}\n\n"
+                    f"📞 *Укажите телефон* (или *нет* чтобы пропустить)",
                     parse_mode="Markdown"
                 )
                 return
 
-            # Один мерчант найден
-            if resolved:
-                info_block = (
-                    f"✅ Найден: *{resolved['name']}*\n"
-                    f"🆔 MID: `{resolved.get('mid') or '—'}`\n"
-                    f"🔑 Код: `{resolved.get('unique_code') or '—'}`\n"
-                )
-            # 0 кандидатов — работаем с именем как есть
-            elif merchant and merchant.lower() not in ("не указан", "unknown", ""):
-                info_block = (
-                    f"⚠️ Мерчант *{merchant}* не найден в базе.\n"
-                    f"Задача будет создана с этим именем, но без MID/кода.\n"
-                )
-            else:
-                info_block = f"🏪 Мерчант: *{merchant}*\n"
-
+            # ─── Несколько задач — batch-режим, без интерактива ─────────
             await update.message.reply_text(
-                f"📋 *Новая задача:*\n\n"
-                f"📝 {title}\n"
-                f"{info_block}"
-                f"⚡ Приоритет: {priority_map.get(p, '🟡 Normal')}\n"
-                f"📂 Категория: {data.get('category', 'Другое')}\n\n"
-                f"📞 *Укажите номер телефона мерчанта для обратной связи*\n"
-                f"(или напишите *нет* чтобы пропустить)",
+                f"🎯 Распознано *{len(tasks)}* задач. Создаю тикеты...",
                 parse_mode="Markdown"
             )
+
+            results = []
+            for task in tasks:
+                merchant = task.get("merchant_name", "Не указан")
+                resolved = None
+                try:
+                    cands = search_merchants_by_name(merchant, limit=3) if merchant and merchant.lower() not in ("не указан", "unknown", "") else []
+                except Exception as e:
+                    logger.error(f"batch search error for {merchant}: {e}")
+                    cands = []
+                # Автовыбор: если есть кандидаты — берём первый (наиболее релевантный)
+                if cands:
+                    resolved = cands[0]
+                    task["merchant_name"] = resolved["name"]
+
+                res = await _create_clickup_task(agent, task, phone=None, resolved_merchant=resolved)
+                results.append((task, resolved, res))
+
+            # Сводка по всем тикетам
+            summary_lines = [f"✅ *Создано {sum(1 for _,_,r in results if r.get('success'))} из {len(results)} тикетов:*\n"]
+            for i, (task, resolved, res) in enumerate(results, 1):
+                if not res.get("success"):
+                    summary_lines.append(f"{i}. ❌ *{task.get('task_title','?')}* — ошибка создания")
+                    continue
+                mname = res.get("merchant", task.get("merchant_name"))
+                code_part = f" [`{res.get('unique_code')}`]" if res.get('unique_code') else ""
+                mid_part  = f" MID:`{res.get('mid')}`" if res.get('mid') else ""
+                summary_lines.append(
+                    f"{i}. {res['emoji']} *{res['title']}*\n"
+                    f"   🏪 {mname}{code_part}{mid_part}\n"
+                    f"   📂 {res['category']}  👤 {res['assigned_to']}\n"
+                    f"   🔖 `{res['task_id'][:8]}`"
+                )
+            await update.message.reply_text("\n\n".join(summary_lines), parse_mode="Markdown")
+            return
 
         elif intent == "question":
             answer = data.get("answer", "Не удалось найти ответ.")
