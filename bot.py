@@ -438,8 +438,8 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
                         "parse_mode": "Markdown",
                     }
                 )
-            except Exception as e:
-                logger.error(f"ÐÑÐ¸Ð±ÐºÐ° ÑÐ²ÐµÐ´Ð¾Ð¼Ð»ÐµÐ½Ð¸Ñ Ð² Ð³ÑÑÐ¿Ð¿Ñ{ {e}")
+            except Exception as e
+                logger.error(f"ÐÑÐ¸Ð±ÐºÐ° ÑÐ²ÐµÐ´Ð¾Ð¼Ð»ÐµÐ½Ð¸Ñ Ð² Ð³ÑÑÐ¿Ð¿Ñ: {e}")
 
         return ticket_id
     else:
