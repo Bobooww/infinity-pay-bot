@@ -102,6 +102,10 @@ def get_ticket_fields(force: bool = False) -> dict:
         _clickup_fields_cache["tickets"] = result
         _clickup_fields_cache["tickets_fetched_at"] = now
         logger.info(f"ClickUp поля загружены ({len(result)}): {list(result.keys())}")
+        # Логируем опции dropdown полей для дебага
+        for name, meta in result.items():
+            if meta.get("options"):
+                logger.info(f"  └─ {name} (dropdown): {list(meta['options'].keys())}")
         return result
     except Exception as e:
         logger.error(f"get_ticket_fields exception: {e}")
@@ -125,12 +129,19 @@ def build_custom_field(name_candidates: list, value, dropdown: bool = False) -> 
         val_key = str(value).strip().lower()
         uuid = field["options"].get(val_key)
         if uuid is None:
-            # Попробуем частичное совпадение
+            # Попробуем частичное совпадение (игнорируем эмодзи/пробелы)
+            import re
+            norm_val = re.sub(r"[^a-zа-я0-9]", "", val_key)
             for opt_name, opt_id in field["options"].items():
-                if val_key in opt_name or opt_name in val_key:
+                norm_opt = re.sub(r"[^a-zа-я0-9]", "", opt_name)
+                if norm_val and norm_opt and (norm_val in norm_opt or norm_opt in norm_val):
                     uuid = opt_id
                     break
         if uuid is None:
+            logger.warning(
+                f"Dropdown '{field['name']}' option '{value}' не найден. "
+                f"Доступные: {list(field['options'].keys())}"
+            )
             return None
         return {"id": field["id"], "value": uuid}
     return {"id": field["id"], "value": str(value)}
@@ -534,16 +545,9 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
     task_title = summary[:80] if summary else message[:80]
     task_name  = f"{emoji} [{category}] {merchant['name']} — {task_title}"
 
-    # Описание — только текст сообщения и AI резюме (остальное в custom fields)
-    phone_line = f"\n📞 **Телефон для связи:** {phone}" if phone else ""
-    description = f"""📩 **Сообщение мерчанта:**
-{message}
-
----
-📋 **AI Резюме:** {ai_analysis.get('escalation_summary', '')}
-🤖 Уверенность: {ai_analysis.get('confidence')}%
-👤 Назначено: {assigned_agent['name']}{phone_line}
-"""
+    # Описание — ТОЛЬКО проблема мерчанта. Всё остальное (приоритет, категория,
+    # телефон, назначенный агент) живёт в custom fields и выглядит чище в UI.
+    description = message.strip() or ai_analysis.get('escalation_summary', '')
 
     # Custom fields — динамически находим ВСЕ подходящие поля в ClickUp
     merchant_name_variants = [merchant.get('name', '')]
@@ -1143,12 +1147,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Если AI уже ответил — проверяем, хочет ли мерчант саппорт ──────
     if session.get("mode") == "self_help":
-        escalation_triggers = ("саппорт", "support", "заявка", "2", "не помогло",
-                               "не работает", "всё равно", "все равно", "не понял",
-                               "не понятно", "создай заявку", "нужен человек",
-                               "отдай саппорту", "отдай специалисту", "позови человека")
         msg_lower = message_text.lower().strip()
-        if msg_lower in escalation_triggers or any(t in msg_lower for t in escalation_triggers):
+
+        # Короткие "нет/no" — сразу эскалация (ответ на "помогло?")
+        short_no = {"нет", "no", "не", "неа", "nope", "ne", "yox", "nein"}
+        is_short_no = msg_lower in short_no
+
+        # Фразы-триггеры эскалации (частичное совпадение)
+        escalation_phrases = (
+            "саппорт", "support", "заявка", "не помог", "не помогло", "не помогает",
+            "не работает", "всё равно", "все равно", "не понял", "не понятно",
+            "создай заявку", "нужен человек", "отдай саппорт", "отдай специалист",
+            "позови человека", "не получилось", "не получается", "не то",
+            "неправильно", "свяжитесь", "позвоните",
+        )
+        is_phrase = any(t in msg_lower for t in escalation_phrases) or msg_lower == "2"
+
+        if is_short_no or is_phrase:
             session["mode"] = "support"
             session["awaiting_phone"] = True
             # ВАЖНО: добавляем это сообщение в сессию — оно содержит контекст эскалации
