@@ -741,8 +741,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TELEGRAM HANDLERS — АГЕНТЫ/ISO
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ─── ClickUp Custom Fields — кеш и авто-создание ───────────────────────────
+_custom_field_cache = {}
+
+def _get_custom_fields():
+    """Получает или создаёт custom fields 'Мерчант' и 'Категория' в ClickUp."""
+    global _custom_field_cache
+    if _custom_field_cache:
+        return _custom_field_cache
+
+    try:
+        # Получаем существующие поля
+        r = requests.get(
+            f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/field",
+            headers=CLICKUP_HEADERS
+        )
+        if r.status_code == 200:
+            fields = r.json().get("fields", [])
+            for f in fields:
+                if f["name"] == "Мерчант":
+                    _custom_field_cache["merchant_id"] = f["id"]
+                elif f["name"] == "Категория":
+                    _custom_field_cache["category_id"] = f["id"]
+
+        # Создаём недостающие поля
+        if "merchant_id" not in _custom_field_cache:
+            r = requests.post(
+                f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/field",
+                headers=CLICKUP_HEADERS,
+                json={"name": "Мерчант", "type": "short_text"}
+            )
+            if r.status_code in (200, 201):
+                _custom_field_cache["merchant_id"] = r.json()["id"]
+
+        if "category_id" not in _custom_field_cache:
+            r = requests.post(
+                f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/field",
+                headers=CLICKUP_HEADERS,
+                json={
+                    "name": "Категория",
+                    "type": "drop_down",
+                    "type_config": {
+                        "options": [
+                            {"name": "Clover POS", "color": "#04A9F4"},
+                            {"name": "Фото/Меню", "color": "#9C27B0"},
+                            {"name": "Документы", "color": "#FF9800"},
+                            {"name": "Транзакции", "color": "#f44336"},
+                            {"name": "Техническая проблема", "color": "#E91E63"},
+                            {"name": "Обновление данных", "color": "#4CAF50"},
+                            {"name": "Биллинг", "color": "#2196F3"},
+                            {"name": "Оборудование", "color": "#795548"},
+                            {"name": "Другое", "color": "#607D8B"},
+                        ]
+                    }
+                }
+            )
+            if r.status_code in (200, 201):
+                _custom_field_cache["category_id"] = r.json()["id"]
+                # Сохраняем маппинг option name -> option id
+                opts = r.json().get("type_config", {}).get("options", [])
+                _custom_field_cache["category_options"] = {o["name"]: o.get("orderindex", o["name"]) for o in opts}
+
+    except Exception as e:
+        logging.error(f"Custom fields error: {e}")
+
+    return _custom_field_cache
+
+
 async def _create_staff_task(update: Update, agent: dict, task_data: dict):
-    """Создаёт СТРУКТУРИРОВАННУЮ задачу в ClickUp с полями мерчанта, приоритета, категории."""
+    """Создаёт СТРУКТУРИРОВАННУЮ задачу в ClickUp с custom fields: Мерчант, Категория."""
     merchant = task_data.get("merchant_name", "Не указан")
     title = task_data.get("task_title", "Новая задача")
     description = task_data.get("task_description", "")
@@ -752,17 +819,11 @@ async def _create_staff_task(update: Update, agent: dict, task_data: dict):
     priority_map = {1: ("🔥", "Urgent"), 2: ("🟠", "High"), 3: ("🟡", "Normal"), 4: ("🟢", "Low")}
     emoji, priority_label = priority_map.get(priority, ("🟡", "Normal"))
 
-    # Красивое имя задачи: 🔥 [Iflowers] Замена фотографий
     task_name = f"{emoji} [{merchant}] {title[:70]}"
 
-    # Структурированное описание с полями
     structured_desc = (
         f"📋 **Задача от сотрудника**\n\n"
-        f"👤 **Сотрудник:** {agent['name']}\n"
-        f"🏪 **Мерчант:** {merchant}\n"
-        f"📂 **Категория:** {category}\n"
-        f"⚡ **Приоритет:** {emoji} {priority_label}\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"👤 **Сотрудник:** {agent['name']}\n\n"
         f"📝 **Описание:**\n{description}"
     )
 
@@ -771,12 +832,24 @@ async def _create_staff_task(update: Update, agent: dict, task_data: dict):
     if merchant != "Не указан":
         tags.append(merchant.lower().replace(" ", "-"))
 
+    # Получаем custom field IDs
+    cf = _get_custom_fields()
+    custom_fields = []
+    if cf.get("merchant_id") and merchant != "Не указан":
+        custom_fields.append({"id": cf["merchant_id"], "value": merchant})
+    if cf.get("category_id"):
+        # Для drop_down нужен orderindex опции
+        cat_options = cf.get("category_options", {})
+        if category in cat_options:
+            custom_fields.append({"id": cf["category_id"], "value": cat_options[category]})
+
     payload = {
         "name": task_name,
         "description": structured_desc,
         "priority": priority,
         "assignees": [assigned_agent["id"]],
         "tags": tags,
+        "custom_fields": custom_fields,
     }
     r = requests.post(
         f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
@@ -809,6 +882,7 @@ async def _create_staff_task(update: Update, agent: dict, task_data: dict):
                 }
             )
     else:
+        logging.error(f"ClickUp create task error: {r.status_code} {r.text}")
         await update.message.reply_text("❌ Ошибка создания задачи в ClickUp.")
 
 
