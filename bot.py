@@ -741,75 +741,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TELEGRAM HANDLERS — АГЕНТЫ/ISO
 # ═══════════════════════════════════════════════════════════════════════════
 
-# ─── ClickUp Custom Fields — кеш и авто-создание ───────────────────────────
-_custom_field_cache = {}
-
-def _get_custom_fields():
-    """Получает или создаёт custom fields 'Мерчант' и 'Категория' в ClickUp."""
-    global _custom_field_cache
-    if _custom_field_cache:
-        return _custom_field_cache
-
-    try:
-        # Получаем существующие поля
-        r = requests.get(
-            f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/field",
-            headers=CLICKUP_HEADERS
-        )
-        if r.status_code == 200:
-            fields = r.json().get("fields", [])
-            for f in fields:
-                if f["name"] == "Мерчант":
-                    _custom_field_cache["merchant_id"] = f["id"]
-                elif f["name"] == "Категория":
-                    _custom_field_cache["category_id"] = f["id"]
-
-        # Создаём недостающие поля
-        if "merchant_id" not in _custom_field_cache:
-            r = requests.post(
-                f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/field",
-                headers=CLICKUP_HEADERS,
-                json={"name": "Мерчант", "type": "short_text"}
-            )
-            if r.status_code in (200, 201):
-                _custom_field_cache["merchant_id"] = r.json()["id"]
-
-        if "category_id" not in _custom_field_cache:
-            r = requests.post(
-                f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/field",
-                headers=CLICKUP_HEADERS,
-                json={
-                    "name": "Категория",
-                    "type": "drop_down",
-                    "type_config": {
-                        "options": [
-                            {"name": "Clover POS", "color": "#04A9F4"},
-                            {"name": "Фото/Меню", "color": "#9C27B0"},
-                            {"name": "Документы", "color": "#FF9800"},
-                            {"name": "Транзакции", "color": "#f44336"},
-                            {"name": "Техническая проблема", "color": "#E91E63"},
-                            {"name": "Обновление данных", "color": "#4CAF50"},
-                            {"name": "Биллинг", "color": "#2196F3"},
-                            {"name": "Оборудование", "color": "#795548"},
-                            {"name": "Другое", "color": "#607D8B"},
-                        ]
-                    }
-                }
-            )
-            if r.status_code in (200, 201):
-                _custom_field_cache["category_id"] = r.json()["id"]
-                # Сохраняем маппинг option name -> option id
-                opts = r.json().get("type_config", {}).get("options", [])
-                _custom_field_cache["category_options"] = {o["name"]: o.get("orderindex", o["name"]) for o in opts}
-
-    except Exception as e:
-        logging.error(f"Custom fields error: {e}")
-
-    return _custom_field_cache
+# ─── Ожидающие задачи от сотрудников (для диалога с телефоном) ──────────────
+pending_agent_tasks = {}  # tg_id -> {"task_data": {...}, "step": "phone"}
 
 
-async def _create_staff_task(update: Update, agent: dict, task_data: dict):
-    """Создаёт СТРУКТУРИРОВАННУЮ задачу в ClickUp с custom fields: Мерчант, Категория."""
+AGENT_AI_PROMPT = """Ты умный ассистент Infinity Pay Inc. (ISO, процессор Tekcard, POS Clover).
+Сотрудник пишет сообщение. Проанализируй ГЛУБОКО и извлеки данные.
+
+ОБЯЗАТЕЛЬНО определи:
+1. intent — "task" если описывает проблему/задачу/просьбу, "question" если вопрос, "other"
+2. merchant_name — ТОЧНОЕ название мерчанта если упоминается, иначе "Не указан"
+3. task_title — КРАТКОЕ название задачи (макс 60 символов)
+4. task_description — ПОДРОБНОЕ описание что нужно сделать
+5. priority — 1=urgent(срочно), 2=high(важно), 3=normal, 4=low(не срочно)
+6. category — одна из: Clover POS, Фото/Меню, Документы, Транзакции, Тех.проблема, Обновление данных, Биллинг, Оборудование, Другое
+7. answer — ответ если question/other
+
+Примеры:
+"Нужно поменять пару фоток у Iflowers срочно"
+→ {"intent":"task","merchant_name":"Iflowers","task_title":"Замена фотографий","task_description":"Заменить несколько фотографий у мерчанта Iflowers","priority":1,"category":"Фото/Меню","answer":""}
+
+"У Pizza Palace не проходят транзакции"
+→ {"intent":"task","merchant_name":"Pizza Palace","task_title":"Не проходят транзакции","task_description":"У мерчанта Pizza Palace не проходят транзакции. Требуется диагностика процессинга.","priority":1,"category":"Транзакции","answer":""}
+
+Ответь ТОЛЬКО JSON без markdown."""
+
+
+async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None):
+    """Создаёт задачу в ClickUp: название, тег мерчанта, приоритет, assignee, описание с телефоном."""
     merchant = task_data.get("merchant_name", "Не указан")
     title = task_data.get("task_title", "Новая задача")
     description = task_data.get("task_description", "")
@@ -819,104 +778,93 @@ async def _create_staff_task(update: Update, agent: dict, task_data: dict):
     priority_map = {1: ("🔥", "Urgent"), 2: ("🟠", "High"), 3: ("🟡", "Normal"), 4: ("🟢", "Low")}
     emoji, priority_label = priority_map.get(priority, ("🟡", "Normal"))
 
-    task_name = f"{emoji} [{merchant}] {title[:70]}"
+    # ── Название задачи — чистое и понятное ──
+    task_name = f"{emoji} {title}"
 
-    structured_desc = (
-        f"📋 **Задача от сотрудника**\n\n"
-        f"👤 **Сотрудник:** {agent['name']}\n\n"
-        f"📝 **Описание:**\n{description}"
-    )
+    # ── Описание с телефоном и деталями ──
+    desc_parts = [f"📋 **Задача**\n"]
+    desc_parts.append(f"👤 **От:** {agent['name']}")
+    desc_parts.append(f"🏪 **Мерчант:** {merchant}")
+    desc_parts.append(f"📂 **Категория:** {category}")
+    if phone:
+        desc_parts.append(f"📞 **Телефон для связи:** {phone}")
+    desc_parts.append(f"\n📝 **Описание:**\n{description}")
 
-    assigned_agent = get_least_loaded_agent()
+    # ── Тег мерчанта — для фильтрации и подсчёта проблем ──
     tags = []
     if merchant != "Не указан":
-        tags.append(merchant.lower().replace(" ", "-"))
+        tags.append(merchant.lower().strip())
 
-    # Получаем custom field IDs
-    cf = _get_custom_fields()
-    custom_fields = []
-    if cf.get("merchant_id") and merchant != "Не указан":
-        custom_fields.append({"id": cf["merchant_id"], "value": merchant})
-    if cf.get("category_id"):
-        # Для drop_down нужен orderindex опции
-        cat_options = cf.get("category_options", {})
-        if category in cat_options:
-            custom_fields.append({"id": cf["category_id"], "value": cat_options[category]})
+    assigned_agent = get_least_loaded_agent()
 
     payload = {
         "name": task_name,
-        "description": structured_desc,
+        "description": "\n".join(desc_parts),
         "priority": priority,
         "assignees": [assigned_agent["id"]],
         "tags": tags,
-        "custom_fields": custom_fields,
     }
+
     r = requests.post(
         f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
         headers=CLICKUP_HEADERS, json=payload
     )
     if r.status_code in (200, 201):
         task_id = r.json()["id"]
-        await update.message.reply_text(
-            f"✅ *Задача создана!*\n\n"
-            f"🏪 Мерчант: *{merchant}*\n"
-            f"📝 {title}\n"
-            f"⚡ Приоритет: {emoji} {priority_label}\n"
-            f"📂 Категория: {category}\n"
-            f"👤 Назначено: *{assigned_agent['name']}*\n"
-            f"🔖 ID: `{task_id[:8]}`",
-            parse_mode="Markdown"
-        )
-        if SUPPORT_GROUP_CHAT_ID:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={
-                    "chat_id": SUPPORT_GROUP_CHAT_ID,
-                    "text": f"{emoji} *Новая задача*\n\n"
-                            f"👤 {agent['name']}\n"
-                            f"🏪 {merchant}\n"
-                            f"📝 {title}\n"
-                            f"📂 {category}\n"
-                            f"➡️ Назначено: {assigned_agent['name']}",
-                    "parse_mode": "Markdown",
-                }
-            )
+        return {
+            "success": True,
+            "task_id": task_id,
+            "assigned_to": assigned_agent["name"],
+            "emoji": emoji,
+            "priority_label": priority_label,
+            "merchant": merchant,
+            "title": title,
+            "category": category,
+            "phone": phone,
+        }
     else:
-        logging.error(f"ClickUp create task error: {r.status_code} {r.text}")
-        await update.message.reply_text("❌ Ошибка создания задачи в ClickUp.")
-
-
-AGENT_AI_PROMPT = """Ты умный ассистент Infinity Pay Inc. (ISO, процессор Tekcard, POS терминалы Clover).
-Сотрудник пишет тебе сообщение. Проанализируй ГЛУБОКО и извлеки структурированные данные.
-
-ОБЯЗАТЕЛЬНО определи:
-1. intent — "task" если описывает проблему/задачу/просьбу, "question" если вопрос, "other" если ни то ни другое
-2. merchant_name — ТОЧНОЕ название мерчанта если упоминается, иначе "Не указан"
-3. task_title — КРАТКОЕ название задачи (макс 60 символов), суть действия
-4. task_description — ПОЛНОЕ описание что нужно сделать, с деталями
-5. priority — число 1-4: 1=urgent (срочно/ASAP), 2=high (важно), 3=normal (обычное), 4=low (не срочно)
-6. category — ОДНА из: "Clover POS", "Фото/Меню", "Документы", "Транзакции", "Техническая проблема", "Обновление данных", "Биллинг", "Оборудование", "Другое"
-7. answer — ответ если intent=question или other
-
-Примеры:
-Вход: "Нужно поменять пару фоток у Iflowers срочно"
-Выход: {"intent":"task","merchant_name":"Iflowers","task_title":"Замена фотографий","task_description":"Требуется заменить несколько фотографий у мерчанта Iflowers. Срочная задача.","priority":1,"category":"Фото/Меню","answer":""}
-
-Вход: "У Pizza Palace не проходят транзакции с обеда"
-Выход: {"intent":"task","merchant_name":"Pizza Palace","task_title":"Не проходят транзакции","task_description":"У мерчанта Pizza Palace не проходят транзакции начиная с обеда. Требуется диагностика проблемы с процессингом.","priority":1,"category":"Транзакции","answer":""}
-
-Вход: "Как посмотреть выписку за прошлый месяц?"
-Выход: {"intent":"question","merchant_name":"Не указан","task_title":"","task_description":"","priority":3,"category":"","answer":"Для просмотра выписки за прошлый месяц зайдите в Clover Dashboard → Reports → Transactions, выберите нужный период."}
-
-Ответь ТОЛЬКО валидным JSON, без markdown-обёртки."""
+        logging.error(f"ClickUp error: {r.status_code} {r.text}")
+        return {"success": False}
 
 
 async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    """AI-powered обработка — понимает естественный язык, создаёт структурированные задачи."""
+    """AI-powered: понимает текст, спрашивает телефон, создаёт задачу."""
     tg_id = update.effective_user.id
     agent = agent_sessions[tg_id]
 
-    # ── AI анализирует ЛЮБОЙ текст от сотрудника ──────────────────────────
+    # ── Шаг 2: ожидаем телефон ─────────────────────────────────────────────
+    if tg_id in pending_agent_tasks:
+        pending = pending_agent_tasks[tg_id]
+
+        # Пропустить
+        if text.lower() in ("нет", "пропустить", "skip", "no", "-", "0"):
+            task_data = pending["task_data"]
+            result = await _create_clickup_task(agent, task_data, phone=None)
+        else:
+            # Принимаем как телефон
+            phone = text.strip()
+            task_data = pending["task_data"]
+            result = await _create_clickup_task(agent, task_data, phone=phone)
+
+        del pending_agent_tasks[tg_id]
+
+        if result.get("success"):
+            await update.message.reply_text(
+                f"✅ *Задача создана в ClickUp!*\n\n"
+                f"{result['emoji']} *{result['title']}*\n"
+                f"🏪 Мерчант: *{result['merchant']}* (тег)\n"
+                f"⚡ Приоритет: {result['emoji']} {result['priority_label']}\n"
+                f"📂 Категория: {result['category']}\n"
+                f"👤 Назначено: *{result['assigned_to']}*\n"
+                f"{'📞 Телефон: ' + result['phone'] if result.get('phone') else '📞 Без телефона'}\n"
+                f"🔖 ID: `{result['task_id'][:8]}`",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text("❌ Ошибка создания задачи в ClickUp.")
+        return
+
+    # ── Шаг 1: AI анализирует текст ───────────────────────────────────────
     try:
         resp = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -926,23 +874,32 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         import json as _json
         raw = resp.content[0].text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        if raw.startswith("\`\`\`"):
+            raw = raw.split("\n", 1)[1].rsplit("\`\`\`", 1)[0].strip()
         data = _json.loads(raw)
         intent = data.get("intent", "other")
 
         if intent == "task":
             merchant = data.get("merchant_name", "Не указан")
             title = data.get("task_title", text[:60])
+            priority_map = {1: "🔥 Urgent", 2: "🟠 High", 3: "🟡 Normal", 4: "🟢 Low"}
+            p = data.get("priority", 3)
+
+            # Сохраняем и спрашиваем телефон
+            pending_agent_tasks[tg_id] = {"task_data": data}
+
             await update.message.reply_text(
-                f"🔄 Понял! Создаю задачу...\n"
+                f"📋 *Новая задача:*\n\n"
+                f"📝 {title}\n"
                 f"🏪 Мерчант: *{merchant}*\n"
-                f"📝 {title}",
+                f"⚡ Приоритет: {priority_map.get(p, '🟡 Normal')}\n"
+                f"📂 Категория: {data.get('category', 'Другое')}\n\n"
+                f"📞 *Укажите номер телефона мерчанта для обратной связи*\n"
+                f"(или напишите *нет* чтобы пропустить)",
                 parse_mode="Markdown"
             )
-            await _create_staff_task(update, agent, data)
         elif intent == "question":
-            answer = data.get("answer", "Не удалось найти ответ. Попробуйте переформулировать.")
+            answer = data.get("answer", "Не удалось найти ответ.")
             await update.message.reply_text(answer)
         else:
             answer = data.get("answer", "")
@@ -950,20 +907,17 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text(answer)
             else:
                 await update.message.reply_text(
-                    f"💡 {agent['name']}, я понимаю обычный текст!\n\n"
-                    f"Просто напишите задачу или вопрос, например:\n"
+                    f"💡 {agent['name']}, просто напишите задачу или вопрос:\n\n"
                     f"• _Поменять фото у Iflowers срочно_\n"
                     f"• _У Pizza Palace не работает терминал_\n"
                     f"• _Как проверить статус транзакции?_\n\n"
-                    f"Также: /stats /logout",
+                    f"/stats /logout",
                     parse_mode="Markdown"
                 )
     except Exception as e:
         logging.error(f"Agent AI error: {e}")
         await update.message.reply_text(
-            f"⚠️ Ошибка AI. Попробуйте ещё раз или используйте:\n"
-            f"/stats — статистика\n"
-            f"/logout — выйти"
+            f"⚠️ Ошибка AI. Попробуйте ещё раз.\n/stats /logout"
         )
 
 
