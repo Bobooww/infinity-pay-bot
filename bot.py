@@ -704,7 +704,8 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
                     or ai_analysis.get("escalation_summary")
                     or message)
     ticket_title = ticket_title.strip().replace("\n", " ")[:120]
-    task_name = ticket_title
+    # Префикс эмодзи приоритета — видно цвет в списке задач ClickUp
+    task_name = f"{emoji} {ticket_title}"
 
     # Описание — ПРОФЕССИОНАЛЬНОЕ описание от AI (что нужно саппорту сделать)
     # + оригинальный текст мерчанта для контекста.
@@ -712,7 +713,7 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
                or ai_analysis.get("escalation_summary") or "").strip()
     original_msg = message.strip()
     if ai_desc and ai_desc != original_msg:
-        description = f"{ai_desc}\n\n---\n📩 Оригинал от мерчанта:\n{original_msg}"
+        description = f"{ai_desc}\n\n---\n📩 Original message from merchant:\n{original_msg}"
     else:
         description = original_msg or ai_desc
 
@@ -990,21 +991,48 @@ SYSTEM_PROMPT_TEMPLATE = """Ты AI-ассистент поддержки Infini
 - НИКОГДА не проси номера карт, SSN, банковские данные.
 - Подозрительная активность (>$7,000 в ресторане с обычным чеком $30-60) — ставь should_escalate=true, priority="High".
 
+ОПРЕДЕЛЕНИЕ ПРИОРИТЕТА — строго по словам-маркерам и смыслу:
+
+🔴 Urgent — ПРЯМО СЕЙЧАС, СРОЧНО, бизнес стоит:
+  Маркеры: "срочно", "сейчас", "прямо сейчас", "asap", "urgent", "не работает совсем", "терминал умер",
+  "не могу принимать платежи", "клиенты ждут", "ничего не проходит", "всё сломалось",
+  "сегодня нужно", "немедленно", "горит", "ЧП", "fraud", "украли", "подозрительная транзакция",
+  "chargeback сегодня", "закрыли аккаунт". Также: "гоним", "быстро", "help asap".
+
+🟠 High — ВАЖНО, сегодня-завтра, частично работает:
+  Маркеры: "важно", "проблема", "не проходят транзакции иногда", "ошибка", "не работает [что-то одно]",
+  "зависает", "глючит", "не печатает чеки", "не видит карту", "ошибка отказа", "declined",
+  "нужно к вечеру", "до завтра", "устранить сегодня", "жалоба клиента".
+
+🟡 Normal — обычная задача, нужно начинать работу:
+  Маркеры: "поменять", "обновить", "добавить", "изменить меню/цены", "настроить",
+  "подключить", "вопрос по", "как сделать", "можно ли", "нужна помощь с настройкой".
+
+🟢 Low — не срочно, когда будет время:
+  Маркеры: "когда будет время", "на днях", "не горит", "на следующей неделе",
+  "для статистики", "на потом", "по возможности", "fyi", "справка".
+
+Если мерчант явно НЕ указал срочность — по умолчанию Normal. НЕ ставь Low автоматически.
+
 Категории ТОЛЬКО из списка: Terminal, Payment, Chargeback, Statement, Billing, Account, Software, Hardware, Fraud, Compliance, General
 
-ТИКЕТ ДЛЯ КОМАНДЫ (если should_escalate=true):
-- "ticket_title" — ЧИСТОЕ, профессиональное название тикета на русском, БЕЗ опечаток, БЕЗ слов "помогите/саппорт/неа/нет", СУТЬ проблемы одной строкой (макс 70 символов).
+ТИКЕТ ДЛЯ КОМАНДЫ (если should_escalate=true) — ВСЁ НА АНГЛИЙСКОМ:
+- "ticket_title" — CLEAN, professional English title, NO typos, NO meta-words ("please help/support/no"),
+  the essence of the issue in one line (max 70 chars). Переводи на английский ДАЖЕ если мерчант писал на русском/таджикском/etc.
   Плохо: "меню поменять и ценцы увидеть неа"
-  Хорошо: "Изменение меню и просмотр цен в Clover POS"
-- "ticket_description" — ПОДРОБНОЕ описание проблемы для команды саппорта (3-5 предложений):
-  1. Что именно нужно мерчанту
-  2. Какой контекст (какой бизнес, что уже пробовали)
-  3. Что AI предложил и почему не подошло (если был диалог)
-  4. Конкретные действия которые должен сделать саппорт
-  Пиши как senior support engineer коллегам — по делу, технически, без воды.
+  Хорошо: "Update Clover POS menu items and view current prices"
+
+- "ticket_description" — DETAILED English description for support team (3-5 sentences):
+  1. What exactly the merchant needs
+  2. Context (business type, what they already tried)
+  3. What AI suggested and why it didn't work (if there was dialog)
+  4. Concrete actions support should take
+  Пиши как senior support engineer коллегам — по делу, технически, без воды, НА АНГЛИЙСКОМ.
+
+- "response_to_merchant" — остаётся на ЯЗЫКЕ МЕРЧАНТА (не переводи его ответ).
 
 JSON ответ (строго этот формат):
-{{"confidence":0-100,"should_escalate":true/false,"category":"<из списка>","priority":"Urgent|High|Normal|Low","response_to_merchant":"ответ мерчанту","ticket_title":"чистое название","ticket_description":"подробное описание","escalation_summary":"краткое резюме 1 строкой","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
+{{"confidence":0-100,"should_escalate":true/false,"category":"<из списка>","priority":"Urgent|High|Normal|Low","response_to_merchant":"ответ мерчанту на его языке","ticket_title":"clean English title","ticket_description":"detailed English description","escalation_summary":"brief English summary 1 line","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
 
 
 
@@ -1600,19 +1628,31 @@ AGENT_AI_PROMPT = """Ты умный ассистент Infinity Pay Inc. (ISO, 
 
 ОБЯЗАТЕЛЬНО определи:
 1. intent — "task" если описывает проблему/задачу/просьбу, "question" если вопрос, "other"
-2. merchant_name — ТОЧНОЕ название мерчанта если упоминается, иначе "Не указан"
-3. task_title — КРАТКОЕ название задачи (макс 60 символов)
-4. task_description — ПОДРОБНОЕ описание что нужно сделать
-5. priority — 1=urgent(срочно), 2=high(важно), 3=normal, 4=low(не срочно)
+2. merchant_name — ТОЧНОЕ название мерчанта как написал сотрудник (оригинал, не переводи), иначе "Не указан"
+3. task_title — CLEAN ENGLISH title (max 70 chars). ВСЕГДА на английском, даже если сотрудник писал на русском/таджикском/узбекском.
+4. task_description — DETAILED ENGLISH description (2-4 sentences) что нужно сделать саппорту. ТОЛЬКО АНГЛИЙСКИЙ.
+5. priority — определи по словам-маркерам:
+   • 1 = URGENT 🔴 — прямо сейчас, бизнес стоит: "срочно", "сейчас", "asap", "urgent",
+     "не работает совсем", "терминал умер", "не могу принимать", "горит", "немедленно",
+     "сегодня нужно", "fraud", "chargeback сегодня", "закрыли аккаунт"
+   • 2 = HIGH 🟠 — важно, частично работает: "важно", "проблема", "ошибка", "зависает",
+     "глючит", "не печатает", "declined", "нужно к вечеру", "до завтра", "жалоба клиента"
+   • 3 = NORMAL 🟡 — обычная задача, нужно начинать: "поменять", "обновить", "добавить",
+     "изменить меню/цены", "настроить", "подключить", "вопрос по", "как сделать" (по умолчанию)
+   • 4 = LOW 🟢 — не срочно: "когда будет время", "на днях", "не горит", "на следующей неделе",
+     "по возможности", "fyi", "справка", "на потом"
 6. category — одна из: Clover POS, Фото/Меню, Документы, Транзакции, Тех.проблема, Обновление данных, Биллинг, Оборудование, Другое
-7. answer — ответ если question/other
+7. answer — ответ если question/other (на языке сотрудника)
 
 Примеры:
 "Нужно поменять пару фоток у Iflowers срочно"
-→ {"intent":"task","merchant_name":"Iflowers","task_title":"Замена фотографий","task_description":"Заменить несколько фотографий у мерчанта Iflowers","priority":1,"category":"Фото/Меню","answer":""}
+→ {"intent":"task","merchant_name":"Iflowers","task_title":"Replace photos in Clover POS menu","task_description":"Merchant Iflowers needs to replace several menu photos in their Clover POS. Urgent — contact merchant to get new photos and upload via Inventory.","priority":1,"category":"Фото/Меню","answer":""}
 
 "У Pizza Palace не проходят транзакции"
-→ {"intent":"task","merchant_name":"Pizza Palace","task_title":"Не проходят транзакции","task_description":"У мерчанта Pizza Palace не проходят транзакции. Требуется диагностика процессинга.","priority":1,"category":"Транзакции","answer":""}
+→ {"intent":"task","merchant_name":"Pizza Palace","task_title":"Transactions not going through","task_description":"Merchant Pizza Palace reports transactions failing. Need to diagnose processing: check terminal connection, Tekcard gateway status, and recent declines in the portal.","priority":1,"category":"Транзакции","answer":""}
+
+"когда будет время обнови адрес у BGI"
+→ {"intent":"task","merchant_name":"BGI","task_title":"Update merchant address on file","task_description":"Non-urgent request to update address for merchant BGI. Contact merchant for new address and update in MPA system.","priority":4,"category":"Обновление данных","answer":""}
 
 Ответь ТОЛЬКО JSON без markdown."""
 
@@ -1657,18 +1697,18 @@ async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None, 
     # Если агент не дал телефон — берём из базы мерчанта
     effective_phone = phone or merchant_phone or None
 
-    task_name = title.strip().replace("\n", " ")[:120]
+    task_name = f"{emoji} {title.strip().replace(chr(10), ' ')[:120]}"
 
-    desc_parts = [f"📋 **Задача от {agent['name']}**"]
+    desc_parts = [f"📋 **Task from {agent['name']}**"]
     if resolved_merchant:
         desc_parts.append(
-            f"🏪 Мерчант: **{merchant_name}** (MID: `{mid or '—'}`, код: `{unique_code or '—'}`)"
+            f"🏪 Merchant: **{merchant_name}** (MID: `{mid or '—'}`, Code: `{unique_code or '—'}`)"
         )
     else:
-        desc_parts.append(f"🏪 Мерчант: **{merchant_name}**")
+        desc_parts.append(f"🏪 Merchant: **{merchant_name}**")
     desc_parts.append(f"\n📝 {description}")
     if effective_phone:
-        desc_parts.append(f"\n📞 **Телефон:** {effective_phone}")
+        desc_parts.append(f"\n📞 **Phone:** {effective_phone}")
 
     tags = []
     if merchant_name and merchant_name != "Не указан":
