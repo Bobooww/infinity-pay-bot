@@ -541,11 +541,12 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
     emoji          = PRIORITY_EMOJI.get(priority_label, "🟡")
 
     # Используем AI-сгенерированное ЧИСТОЕ название (без опечаток/сленга)
+    # БЕЗ префиксов категории/мерчанта — они живут в отдельных custom fields.
     ticket_title = (ai_analysis.get("ticket_title")
                     or ai_analysis.get("escalation_summary")
                     or message)
-    ticket_title = ticket_title.strip().replace("\n", " ")[:80]
-    task_name = f"{emoji} [{category}] {merchant['name']} — {ticket_title}"
+    ticket_title = ticket_title.strip().replace("\n", " ")[:120]
+    task_name = ticket_title
 
     # Описание — ПРОФЕССИОНАЛЬНОЕ описание от AI (что нужно саппорту сделать)
     # + оригинальный текст мерчанта для контекста.
