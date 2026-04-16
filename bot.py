@@ -45,7 +45,51 @@ CLICKUP_HEADERS = {
 }
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
 
+# ─── Саппорт-команда (ClickUp User IDs) ───────────────────────────────────
+SUPPORT_AGENTS = [
+    {"id": 94469635, "name": "Support 1"},
+    {"id": 94469636, "name": "Support 2"},
+]
+
 anthropic_client = Anthropic(api_key=CLAUDE_API_KEY)
+
+
+# ─── Авто-назначение тикетов по нагрузке ──────────────────────────────────
+
+def get_least_loaded_agent() -> dict:
+    """Возвращает агента с наименьшим количеством открытых тикетов."""
+    agent_loads = []
+
+    for agent in SUPPORT_AGENTS:
+        try:
+            r = requests.get(
+                f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
+                headers=CLICKUP_HEADERS,
+                params={
+                    "assignees[]": [agent["id"]],
+                    "statuses[]": ["Open", "In Progress"],
+                    "include_closed": False,
+                    "subtasks": False,
+                    "page": 0,
+                }
+            )
+            if r.status_code == 200:
+                tasks = r.json().get("tasks", [])
+                agent_loads.append({"agent": agent, "open_tickets": len(tasks)})
+                logger.info(f"Агент {agent['name']}: {len(tasks)} открытых тикетов")
+            else:
+                logger.warning(f"Ошибка загрузки тикетов для {agent['name']}: {r.status_code}")
+                agent_loads.append({"agent": agent, "open_tickets": 999})
+        except Exception as e:
+            logger.error(f"Ошибка при проверке нагрузки {agent['name']}: {e}")
+            agent_loads.append({"agent": agent, "open_tickets": 999})
+
+    # Сортируем по количеству открытых тикетов — первый = наименее загружен
+    agent_loads.sort(key=lambda x: x["open_tickets"])
+    chosen = agent_loads[0]["agent"]
+    logger.info(f"Назначаем тикет на: {chosen['name']} (ID: {chosen['id']})")
+    return chosen
+
 
 # ─── Временное хранилище состояния ──────────────────────────────────────────
 # В production лучше использовать Redis или PostgreSQL
@@ -57,44 +101,70 @@ merchant_cache = {}  # {telegram_id: merchant_data}
 # ─── ClickUp helpers ────────────────────────────────────────────────────────
 
 def search_merchant_by_code(code: str) -> dict | None:
-    """Ищет мерчанта в ClickUp по уникальному коду (INF-001)."""
-    r = requests.get(
-        f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
-        headers=CLICKUP_HEADERS,
-        params={"search": code, "include_closed": False}
-    )
-    if r.status_code != 200:
-        logger.error(f"ClickUp search error: {r.status_code} {r.text}")
-        return None
+    """Ищет мерчанта в ClickUp по уникальному коду (INF-001).
 
-    tasks = r.json().get("tasks", [])
-    for task in tasks:
-        # Проверяем custom fields
-        for field in task.get("custom_fields", []):
-            if field.get("name") == "Unique Code":
-                val = field.get("value", "")
-                if val and val.strip().upper() == code.strip().upper():
-                    return extract_merchant_data(task)
+    Загружает ВСЕ задачи из списка мерчантов и проверяет custom field
+    'Unique Code', т.к. ClickUp search ищет только по названию задачи.
+    """
+    page = 0
+    while True:
+        r = requests.get(
+            f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
+            headers=CLICKUP_HEADERS,
+            params={"include_closed": False, "page": page, "subtasks": False}
+        )
+        if r.status_code != 200:
+            logger.error(f"ClickUp search error: {r.status_code} {r.text}")
+            return None
+
+        tasks = r.json().get("tasks", [])
+        if not tasks:
+            break
+
+        for task in tasks:
+            for field in task.get("custom_fields", []):
+                if field.get("name") == "Unique Code":
+                    val = field.get("value", "")
+                    if val and val.strip().upper() == code.strip().upper():
+                        logger.info(f"Мерчант найден: {task['name']} (код: {code})")
+                        return extract_merchant_data(task)
+
+        # ClickUp отдаёт до 100 задач на страницу
+        if len(tasks) < 100:
+            break
+        page += 1
+
+    logger.warning(f"Мерчант с кодом {code} не найден")
     return None
 
 
 def search_merchant_by_telegram_id(telegram_id: int) -> dict | None:
-    """Ищет мерчанта по Telegram User ID."""
-    r = requests.get(
-        f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
-        headers=CLICKUP_HEADERS,
-        params={"include_closed": False}
-    )
-    if r.status_code != 200:
-        return None
+    """Ищет мерчанта по Telegram User ID (с пагинацией)."""
+    page = 0
+    while True:
+        r = requests.get(
+            f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
+            headers=CLICKUP_HEADERS,
+            params={"include_closed": False, "page": page, "subtasks": False}
+        )
+        if r.status_code != 200:
+            return None
 
-    tasks = r.json().get("tasks", [])
-    for task in tasks:
-        for field in task.get("custom_fields", []):
-            if field.get("name") == "Telegram ID":
-                val = field.get("value", "")
-                if val and str(val).strip() == str(telegram_id):
-                    return extract_merchant_data(task)
+        tasks = r.json().get("tasks", [])
+        if not tasks:
+            break
+
+        for task in tasks:
+            for field in task.get("custom_fields", []):
+                if field.get("name") == "Telegram ID":
+                    val = field.get("value", "")
+                    if val and str(val).strip() == str(telegram_id):
+                        return extract_merchant_data(task)
+
+        if len(tasks) < 100:
+            break
+        page += 1
+
     return None
 
 
@@ -154,9 +224,12 @@ def save_telegram_id_to_merchant(task_id: str, telegram_id: int, field_ids: dict
 
 
 def create_support_ticket(merchant: dict, message: str, ai_analysis: dict) -> str | None:
-    """Создаёт тикет поддержки в ClickUp."""
+    """Создаёт тикет поддержки в ClickUp с авто-назначением на наименее загруженного агента."""
     priority_map = {"Urgent": 1, "High": 2, "Normal": 3, "Low": 4}
     priority = priority_map.get(ai_analysis.get("priority", "Normal"), 3)
+
+    # Определяем наименее загруженного агента
+    assigned_agent = get_least_loaded_agent()
 
     task_name = f"[{ai_analysis.get('category', 'Other')}] {merchant['name']} — {message[:60]}"
 
@@ -172,6 +245,7 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict) -> st
 - Категория: {ai_analysis.get('category')}
 - Приоритет: {ai_analysis.get('priority')}
 - Уверенность: {ai_analysis.get('confidence')}%
+- Назначено: {assigned_agent['name']}
 
 **📋 Резюме:**
 {ai_analysis.get('escalation_summary', '')}
@@ -182,6 +256,7 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict) -> st
         "description": description,
         "priority": priority,
         "status": "Open",
+        "assignees": [assigned_agent["id"]],
         "custom_fields": []
     }
 
