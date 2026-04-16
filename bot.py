@@ -20,7 +20,9 @@ import logging
 import asyncio
 import time
 import tempfile
-from datetime import datetime
+import signal
+from pathlib import Path
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 from anthropic import Anthropic
 import httpx
@@ -129,6 +131,12 @@ ticket_to_tg = {}  # {clickup_ticket_id: tg_id (int)}
 SPAM_LIMIT  = 10   # Ð¼Ð°ÐºÑ 10 ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ Ð·Ð° 60 ÑÐµÐº
 SPAM_WINDOW = 60
 
+# Persistence
+STATE_FILE = Path("data/state.json")
+
+# Clover
+CLOVER_BASE = os.environ.get("CLOVER_BASE_URL", "https://api.clover.com")
+
 # âââ Ð¡ÑÐ°ÑÐ¸ÑÑÐ¸ÐºÐ° ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 stats = {
     "total_messages":   0,
@@ -208,6 +216,37 @@ def cleanup_faq_cache():
         sorted_keys = sorted(faq_cache, key=lambda k: faq_cache[k].get("last_used", 0))
         for k in sorted_keys[:len(faq_cache) - FAQ_CACHE_MAX]:
             del faq_cache[k]
+
+
+
+# Persistence functions
+def load_state():
+    """Load merchant_cache, ticket_to_tg, notification_cache from disk."""
+    global merchant_cache, ticket_to_tg, notification_cache
+    try:
+        if STATE_FILE.exists():
+            data = json.loads(STATE_FILE.read_text(encoding='utf-8'))
+            merchant_cache.update({int(k): v for k, v in data.get('merchant_cache', {}).items()})
+            ticket_to_tg.update(data.get('ticket_to_tg', {}))
+            notification_cache.update(data.get('notification_cache', {}))
+            logger.info(f'State loaded: {len(merchant_cache)} merchants, {len(ticket_to_tg)} tickets')
+    except Exception as e:
+        logger.error(f'Failed to load state: {e}')
+
+
+def save_state():
+    """Save critical state to disk."""
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            'merchant_cache': {str(k): v for k, v in merchant_cache.items()},
+            'ticket_to_tg': ticket_to_tg,
+            'notification_cache': notification_cache,
+            'saved_at': datetime.utcnow().isoformat(),
+        }
+        STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception as e:
+        logger.error(f'Failed to save state: {e}')
 
 
 def parse_ai_json(text: str) -> dict:
@@ -326,6 +365,8 @@ def extract_merchant_data(task: dict) -> dict:
         "business_type": "",
         "unique_code":   "",
         "telegram_id":   "",
+        "clover_merchant_id": "",
+        "clover_access_token": "",
     }
     field_map = {
         "MID":           "mid",
@@ -335,6 +376,8 @@ def extract_merchant_data(task: dict) -> dict:
         "Business Type": "business_type",
         "Unique Code":   "unique_code",
         "Telegram ID":   "telegram_id",
+        "Clover MID":    "clover_merchant_id",
+        "Clover Token":  "clover_access_token",
     }
     for field in task.get("custom_fields", []):
         key = field_map.get(field.get("name", ""))
@@ -427,6 +470,7 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
                 ticket_to_tg[ticket_id] = int(tg_id_val)
             except (ValueError, TypeError):
                 pass
+        save_state()
 
         # ÐÑÐ±Ð»Ð¸ÑÑÐµÐ¼ Ð² TG-Ð³ÑÑÐ¿Ð¿Ñ Ð¿Ð¾Ð´Ð´ÐµÑÐ¶ÐºÐ¸
         if SUPPORT_GROUP_CHAT_ID:
@@ -491,7 +535,101 @@ SYSTEM_PROMPT_TEMPLATE = """Ð¢Ñ AI-Ð°ÑÑÐ¸ÑÑÐµÐ½Ñ Inf
 ÐÐ°ÑÐµÐ³Ð¾ÑÐ¸Ð¸ Ð¢ÐÐÐ¬ÐÐ Ð¸Ð· ÑÐ¿Ð¸ÑÐºÐ°): Terminal, Payment, Chargeback, Statement, Billing, Account, Software, Hardware, Fraud, Compliance, General
 
 JSON Ð¾ÑÐ²ÐµÑ:
-{{"confidence":0-100,"should_escalate":true/false,"category":"<Ð¸Ð· ÑÐ¿Ð¸ÑÐºÐ°>","priority":"Urgent|High|Normal|Low","response_to_merchant":"ÑÐµÐºÑÑ","escalation_summary":"ÑÐµÐ·ÑÐ¼Ðµ"}}"""
+{{"confidence":0-100,"should_escalate":true/false,"category":"<Ð¸Ð· ÑÐ¿Ð¸ÑÐºÐ°>","priority":"Urgent|High|Normal|Low","response_to_merchant":"ÑÐµÐºÑÑ","escalation_summary":"ÑÐµÐ·ÑÐ¼Ðµ","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
+
+
+
+# Clover API helpers
+def _clover_headers(token):
+    return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+
+def get_clover_sales_today(merchant):
+    mid = merchant.get("clover_merchant_id", "")
+    token = merchant.get("clover_access_token", "")
+    if not mid or not token:
+        return None
+    try:
+        now = datetime.now(timezone.utc)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ms = int(start.timestamp() * 1000)
+        r = httpx.get(
+            f"{CLOVER_BASE}/v3/merchants/{mid}/orders",
+            headers=_clover_headers(token),
+            params={"filter": f"createdTime>={start_ms} AND paymentState=PAID",
+                    "limit": 1000},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return None
+        orders = r.json().get("elements", [])
+        total_usd = sum(o.get("total", 0) for o in orders) / 100
+        return f"{len(orders)} orders, ${total_usd:,.2f} today"
+    except Exception as e:
+        logger.error(f"Clover sales: {e}")
+        return None
+
+
+def get_clover_last_order(merchant):
+    mid = merchant.get("clover_merchant_id", "")
+    token = merchant.get("clover_access_token", "")
+    if not mid or not token:
+        return None
+    try:
+        r = httpx.get(
+            f"{CLOVER_BASE}/v3/merchants/{mid}/orders",
+            headers=_clover_headers(token),
+            params={"orderBy": "createdTime DESC", "limit": 1, "expand": "lineItems"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            return None
+        orders = r.json().get("elements", [])
+        if not orders:
+            return "No orders found"
+        o = orders[0]
+        total = o.get("total", 0) / 100
+        ts = o.get("createdTime", 0)
+        dt = datetime.utcfromtimestamp(ts / 1000).strftime("%d.%m %H:%M")
+        items = o.get("lineItems", {}).get("elements", [])
+        names = ", ".join(it.get("name", "?") for it in items[:5])
+        return f"Last order ({dt}): ${total:.2f} | {names or 'no details'}"
+    except Exception as e:
+        logger.error(f"Clover last order: {e}")
+        return None
+
+
+def toggle_clover_item(merchant, item_name, enable):
+    mid = merchant.get("clover_merchant_id", "")
+    token = merchant.get("clover_access_token", "")
+    if not mid or not token:
+        return None
+    try:
+        r = httpx.get(
+            f"{CLOVER_BASE}/v3/merchants/{mid}/items",
+            headers=_clover_headers(token),
+            timeout=10
+        )
+        if r.status_code != 200:
+            return None
+        all_items = r.json().get("elements", [])
+        matches = [it for it in all_items if item_name.lower() in it.get("name", "").lower()]
+        if not matches:
+            return f"Item not found: {item_name}"
+        item = matches[0]
+        r2 = httpx.post(
+            f"{CLOVER_BASE}/v3/merchants/{mid}/items/{item['id']}",
+            headers=_clover_headers(token),
+            json={"hidden": not enable},
+            timeout=10
+        )
+        if r2.status_code in (200, 201):
+            action = "enabled" if enable else "disabled"
+            return f"Item '{item['name']}' {action}"
+        return None
+    except Exception as e:
+        logger.error(f"Clover toggle: {e}")
+        return None
 
 
 def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) -> dict:
@@ -747,6 +885,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_telegram_id_to_merchant(merchant["task_id"], tg_id)
             merchant["telegram_id"] = str(tg_id)
             merchant_cache[tg_id] = merchant
+            save_state()
             user_states[tg_id] = "identified"
             await update.message.reply_text(
                 f"â *ÐÐ´ÐµÐ½ÑÐ¸ÑÐ¸ÐºÐ°ÑÐ¸Ñ ÑÑÐ¿ÐµÑÐ½Ð°!*\n\n"
@@ -895,6 +1034,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ââ ÐÐµÑÐ²Ð¾Ðµ ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ðµ Ð¼ÐµÑÑÐ°Ð½ÑÐ° â Ð·Ð°Ð¿Ð¾Ð¼Ð¸Ð½Ð°ÐµÐ¼ Ð¸ ÑÐ¿ÑÐ°ÑÐ¸Ð²Ð°ÐµÐ¼ Ð²ÑÐ±Ð¾Ñ ââââââââ
     session["messages"].append(message_text)
+
+    # Clover intent check (if merchant has credentials, handle live data queries)
+    if merchant.get("clover_merchant_id") and merchant.get("clover_access_token"):
+        msg_lower = message_text.lower()
+        sales_kw = ["sales", "revenue", "today", "orders today",
+                    "продажи", "выручка", "заказы сегодня", "продажи сегодня"]
+        order_kw = ["last order", "latest order", "последний заказ", "последняя заказ"]
+        toggle_kw = ["disable", "enable", "turn off", "turn on", "hide",
+                     "выключи", "включи", "убрать из меню", "добавить в меню"]
+        clover_resp = None
+        if any(kw in msg_lower for kw in sales_kw):
+            clover_resp = get_clover_sales_today(merchant)
+        elif any(kw in msg_lower for kw in order_kw):
+            clover_resp = get_clover_last_order(merchant)
+        elif any(kw in msg_lower for kw in toggle_kw):
+            enable = any(kw in msg_lower for kw in ["включи", "enable", "turn on", "добавить"])
+            clover_resp = toggle_clover_item(merchant, message_text, enable)
+        if clover_resp:
+            await update.message.reply_text(clover_resp)
+            return
+
     session["awaiting_choice"] = True
     await update.message.reply_text(
         f"ð *{merchant['name']}*, ÐºÐ°Ðº Ð²Ð°Ð¼ Ð¿Ð¾Ð¼Ð¾ÑÑ?\n\n"
@@ -1260,6 +1420,15 @@ def main():
     print("\nâââââââââââââââââââââââââââââââââââââââââââ")
     print(" Infinity Pay Bot v2 â Starting...")
     print("âââââââââââââââââââââââââââââââââââââââââââ\n")
+
+
+    load_state()
+
+    def _sigterm(signum, frame):
+        logger.info("SIGTERM: saving state...")
+        save_state()
+        import sys; sys.exit(0)
+    signal.signal(signal.SIGTERM, _sigterm)
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
