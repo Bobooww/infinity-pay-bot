@@ -491,6 +491,70 @@ def search_merchant_by_telegram_id(telegram_id: int) -> dict | None:
     return None
 
 
+def search_merchants_by_name(query: str, limit: int = 5) -> list:
+    """Fuzzy поиск мерчантов по имени.
+    Возвращает список совпадений (до `limit`), отсортированных по релевантности.
+    Использует нормализацию: lowercase + убираем не-алфавит/цифры.
+    """
+    import re
+    if not query or not query.strip():
+        return []
+    q_raw = query.strip().lower()
+    q_norm = re.sub(r"[^a-zа-я0-9]+", "", q_raw)
+    if not q_norm:
+        return []
+
+    exact_matches   = []
+    startswith      = []
+    contains        = []
+    token_matches   = []
+    q_tokens = set(t for t in re.split(r"[^a-zа-я0-9]+", q_raw) if len(t) >= 3)
+
+    page = 0
+    while True:
+        r = httpx.get(
+            f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
+            headers=CLICKUP_HEADERS,
+            params={"include_closed": False, "page": page, "subtasks": False}
+        )
+        if r.status_code != 200:
+            break
+        tasks = r.json().get("tasks", [])
+        if not tasks:
+            break
+        for task in tasks:
+            m = extract_merchant_data(task)
+            name = (m.get("name") or "").lower()
+            name_norm = re.sub(r"[^a-zа-я0-9]+", "", name)
+            if not name_norm:
+                continue
+            if name_norm == q_norm:
+                exact_matches.append(m)
+            elif name_norm.startswith(q_norm) or q_norm.startswith(name_norm):
+                startswith.append(m)
+            elif q_norm in name_norm or name_norm in q_norm:
+                contains.append(m)
+            else:
+                name_tokens = set(t for t in re.split(r"[^a-zа-я0-9]+", name) if len(t) >= 3)
+                if q_tokens and name_tokens and (q_tokens & name_tokens):
+                    token_matches.append(m)
+        if len(tasks) < 100:
+            break
+        page += 1
+
+    combined = exact_matches + startswith + contains + token_matches
+    # Убираем дубли по task_id
+    seen = set()
+    unique = []
+    for m in combined:
+        if m["task_id"] not in seen:
+            seen.add(m["task_id"])
+            unique.append(m)
+            if len(unique) >= limit:
+                break
+    return unique
+
+
 def extract_merchant_data(task: dict) -> dict:
     """Извлекает данные мерчанта."""
     data = {
@@ -1472,52 +1536,116 @@ AGENT_AI_PROMPT = """Ты умный ассистент Infinity Pay Inc. (ISO, 
 Ответь ТОЛЬКО JSON без markdown."""
 
 
-async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None):
-    """Создаёт задачу в ClickUp с custom fields."""
-    merchant    = task_data.get("merchant_name", "Не указан")
-    title       = task_data.get("task_title", "Новая задача")
-    description = task_data.get("task_description", "")
-    priority    = task_data.get("priority", 3)
-    category    = task_data.get("category", "Другое")
+async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None, resolved_merchant: dict = None):
+    """Создаёт задачу в ClickUp с custom fields.
+    Если resolved_merchant передан — тянем из него MID/код/телефон и тд.
+    """
+    merchant_name = task_data.get("merchant_name", "Не указан")
+    title         = task_data.get("task_title", "Новая задача")
+    description   = task_data.get("task_description", "")
+    priority      = task_data.get("priority", 3)
+    category      = task_data.get("category", "Другое")
+
+    # Маппинг внутренних русских категорий на ClickUp dropdown options
+    cat_ru_to_en = {
+        "Clover POS":        "Software",
+        "Фото/Меню":         "Software",
+        "Документы":         "Account",
+        "Транзакции":        "Payment",
+        "Тех.проблема":      "Hardware",
+        "Оборудование":      "Hardware",
+        "Обновление данных": "Account",
+        "Биллинг":           "Account",
+        "Другое":            "Other",
+    }
+    category_mapped = cat_ru_to_en.get(category, category)
 
     priority_map = {1: ("🔥", "Urgent"), 2: ("🟠", "High"), 3: ("🟡", "Normal"), 4: ("🟢", "Low")}
     emoji, priority_label = priority_map.get(priority, ("🟡", "Normal"))
 
-    # ── Название задачи — чистое и понятное ──
-    task_name = f"{emoji} {title}"
+    # Если мерчант найден в базе — берём актуальное имя и подмешиваем данные
+    mid           = ""
+    unique_code   = ""
+    merchant_phone = ""
+    if resolved_merchant:
+        merchant_name  = resolved_merchant.get("name") or merchant_name
+        mid            = resolved_merchant.get("mid", "") or ""
+        unique_code    = resolved_merchant.get("unique_code", "") or ""
+        merchant_phone = resolved_merchant.get("phone", "") or ""
 
-    # ── Описание — только суть задачи ──
-    desc_parts = [f"📋 **Задача от {agent['name']}**\n"]
-    desc_parts.append(f"📝 {description}")
-    if phone:
-        desc_parts.append(f"\n📞 **Телефон для связи:** {phone}")
+    # Если агент не дал телефон — берём из базы мерчанта
+    effective_phone = phone or merchant_phone or None
 
-    # ── Тег мерчанта — для фильтрации ──
+    task_name = title.strip().replace("\n", " ")[:120]
+
+    desc_parts = [f"📋 **Задача от {agent['name']}**"]
+    if resolved_merchant:
+        desc_parts.append(
+            f"🏪 Мерчант: **{merchant_name}** (MID: `{mid or '—'}`, код: `{unique_code or '—'}`)"
+        )
+    else:
+        desc_parts.append(f"🏪 Мерчант: **{merchant_name}**")
+    desc_parts.append(f"\n📝 {description}")
+    if effective_phone:
+        desc_parts.append(f"\n📞 **Телефон:** {effective_phone}")
+
     tags = []
-    if merchant != "Не указан":
-        tags.append(merchant.lower().strip())
+    if merchant_name and merchant_name != "Не указан":
+        tags.append(merchant_name.lower().strip())
+    if unique_code:
+        tags.append(unique_code.lower())
 
     assigned_agent = get_least_loaded_agent()
 
-    # ── Custom fields — dropdown поля как option UUID ──
-    cat_uuid = CATEGORY_OPTIONS.get(category, CATEGORY_OPTIONS.get("Other", ""))
-    pri_uuid = PRIORITY_OPTIONS.get(priority_label, PRIORITY_OPTIONS.get("Normal", ""))
-    src_uuid = SOURCE_OPTIONS.get("Internal Task", "")
-    chn_uuid = CHANNEL_OPTIONS.get("Telegram", "")
+    # ── Custom fields — dynamic lookup + dropdown per-field endpoint ──
+    custom_fields = []
 
-    custom_fields = [
-        {"id": TICKET_FIELDS["merchant"],       "value": merchant},
+    # Merchant name (text field)
+    for name_candidate in ["Merchant", "Мерчант", "Merchant Name", "Название мерчанта"]:
+        cf = build_custom_field([name_candidate], merchant_name)
+        if cf and not any(x["id"] == cf["id"] for x in custom_fields):
+            custom_fields.append(cf)
+
+    # MID
+    if mid:
+        cf = build_custom_field(["MID", "Merchant ID"], mid)
+        if cf: custom_fields.append(cf)
+
+    # Unique Code (INF-XXX)
+    if unique_code:
+        cf = build_custom_field(["Unique Code", "Код мерчанта", "INF Code"], unique_code)
+        if cf: custom_fields.append(cf)
+
+    # Category dropdown
+    cf = build_custom_field(["Category", "Категория"], category_mapped, dropdown=True)
+    if cf: custom_fields.append(cf)
+
+    # Priority Level dropdown
+    cf = build_custom_field(
+        ["Priority Level", "Priority", "Приоритет", "Уровень приоритета"],
+        priority_label, dropdown=True
+    )
+    if cf: custom_fields.append(cf)
+
+    # Source dropdown — задача от агента = Internal Task
+    cf = build_custom_field(["Source", "Источник"], "Internal Task", dropdown=True)
+    if cf: custom_fields.append(cf)
+
+    # Channel dropdown
+    cf = build_custom_field(["Channel", "Канал"], "Telegram", dropdown=True)
+    if cf: custom_fields.append(cf)
+
+    # Phone
+    if effective_phone:
+        cf = build_custom_field(["Phone", "Телефон"], effective_phone)
+        if cf: custom_fields.append(cf)
+
+    # Разделяем: dropdowns отдельно
+    dropdown_fields = [f for f in custom_fields if f.get("_dropdown")]
+    plain_fields = [
+        {"id": f["id"], "value": f["value"]}
+        for f in custom_fields if not f.get("_dropdown")
     ]
-    if cat_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["category"],       "value": cat_uuid})
-    if pri_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["priority_level"], "value": pri_uuid})
-    if src_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["source"],         "value": src_uuid})
-    if chn_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["channel"],        "value": chn_uuid})
-    if phone:
-        custom_fields.append({"id": TICKET_FIELDS["phone"], "value": phone})
 
     payload = {
         "name":          task_name,
@@ -1525,8 +1653,13 @@ async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None):
         "priority":      priority,
         "assignees":     [assigned_agent["id"]],
         "tags":          tags,
-        "custom_fields": custom_fields,
+        "custom_fields": plain_fields,
     }
+
+    logger.info(
+        f"[agent task] Creating: plain={len(plain_fields)}, dropdowns={len(dropdown_fields)} "
+        f"({[(f.get('field_name'), f.get('_option_label')) for f in dropdown_fields]})"
+    )
 
     r = httpx.post(
         f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
@@ -1536,16 +1669,51 @@ async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None):
 
     if r.status_code in (200, 201):
         task_id = r.json()["id"]
+
+        # Ставим dropdowns по одному
+        for df in dropdown_fields:
+            field_id   = df["id"]
+            field_name = df.get("field_name", field_id[:8])
+            uuid_val   = df.get("value")
+            order_val  = df.get("orderindex")
+            url = f"{CLICKUP_BASE}/task/{task_id}/field/{field_id}"
+
+            ok = False
+            if uuid_val:
+                rr = httpx.post(url, headers=CLICKUP_HEADERS, json={"value": uuid_val})
+                if rr.status_code in (200, 201):
+                    logger.info(f"  ✓ {field_name} = {df.get('_option_label')} (uuid)")
+                    ok = True
+                else:
+                    logger.warning(f"  ✗ {field_name} uuid failed: {rr.status_code} {rr.text[:200]}")
+
+            if not ok and order_val is not None:
+                try:
+                    order_int = int(order_val)
+                except (TypeError, ValueError):
+                    order_int = order_val
+                rr = httpx.post(url, headers=CLICKUP_HEADERS, json={"value": order_int})
+                if rr.status_code in (200, 201):
+                    logger.info(f"  ✓ {field_name} = {df.get('_option_label')} (orderindex={order_int})")
+                    ok = True
+                else:
+                    logger.error(f"  ✗ {field_name} orderindex failed: {rr.status_code} {rr.text[:200]}")
+
+            if not ok:
+                logger.error(f"  ✗✗ {field_name}: ВСЕ попытки провалились")
+
         return {
             "success":        True,
             "task_id":        task_id,
             "assigned_to":    assigned_agent["name"],
             "emoji":          emoji,
             "priority_label": priority_label,
-            "merchant":       merchant,
+            "merchant":       merchant_name,
+            "mid":            mid,
+            "unique_code":    unique_code,
             "title":          title,
-            "category":       category,
-            "phone":          phone,
+            "category":       category_mapped,
+            "phone":          effective_phone,
         }
     else:
         logger.error(f"ClickUp error: {r.status_code} {r.text}")
@@ -1617,19 +1785,76 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
             return
 
-    # ── Шаг 2: ожидаем телефон ───────────────────────────────────────────
-    if tg_id in pending_agent_tasks:
+    # ── Шаг 1.5: выбор мерчанта из кандидатов ────────────────────────────
+    if tg_id in pending_agent_tasks and pending_agent_tasks[tg_id].get("step") == "pick_merchant":
         pending = pending_agent_tasks[tg_id]
+        candidates = pending["candidates"]
+        choice = text.strip().lower()
+
+        picked = None
+        if choice in ("0", "нет", "пропустить", "skip", "без", "no"):
+            picked = "none"  # задача без привязки к мерчанту
+        elif choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(candidates):
+                picked = candidates[idx]
+        else:
+            # попробуем по имени
+            for c in candidates:
+                if choice in c["name"].lower():
+                    picked = c
+                    break
+
+        if picked is None:
+            names_list = "\n".join(
+                f"{i+1}. *{c['name']}* — MID: `{c.get('mid') or '—'}`, код: `{c.get('unique_code') or '—'}`"
+                for i, c in enumerate(candidates)
+            )
+            await update.message.reply_text(
+                f"🤔 Не понял. Выберите номер:\n\n{names_list}\n\n"
+                f"0 — создать задачу без мерчанта",
+                parse_mode="Markdown"
+            )
+            return
+
+        if picked == "none":
+            pending["resolved_merchant"] = None
+        else:
+            pending["resolved_merchant"] = picked
+            pending["task_data"]["merchant_name"] = picked["name"]
+
+        pending["step"] = "phone"
+        m = pending.get("resolved_merchant")
+        info = ""
+        if m:
+            info = (
+                f"✅ Мерчант: *{m['name']}*\n"
+                f"🆔 MID: `{m.get('mid') or '—'}`\n"
+                f"🔑 Код: `{m.get('unique_code') or '—'}`\n\n"
+            )
+        else:
+            info = "⚠️ Задача будет создана без привязки к мерчанту\n\n"
+        await update.message.reply_text(
+            f"{info}📞 *Укажите номер телефона мерчанта для обратной связи*\n"
+            f"(или напишите *нет* чтобы пропустить)",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ── Шаг 2: ожидаем телефон ───────────────────────────────────────────
+    if tg_id in pending_agent_tasks and pending_agent_tasks[tg_id].get("step") == "phone":
+        pending = pending_agent_tasks[tg_id]
+        resolved = pending.get("resolved_merchant")
 
         # Пропустить
         if text.lower() in ("нет", "пропустить", "skip", "no", "-", "0"):
             task_data = pending["task_data"]
-            result = await _create_clickup_task(agent, task_data, phone=None)
+            result = await _create_clickup_task(agent, task_data, phone=None, resolved_merchant=resolved)
         else:
             # Принимаем как телефон
             phone = text.strip()
             task_data = pending["task_data"]
-            result = await _create_clickup_task(agent, task_data, phone=phone)
+            result = await _create_clickup_task(agent, task_data, phone=phone, resolved_merchant=resolved)
 
         del pending_agent_tasks[tg_id]
 
@@ -1637,8 +1862,10 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(
                 f"✅ *Задача создана в ClickUp!*\n\n"
                 f"{result['emoji']} *{result['title']}*\n"
-                f"🏪 Мерчант: *{result['merchant']}* (тег)\n"
-                f"⚡ Приоритет: {result['emoji']} {result['priority_label']}\n"
+                f"🏪 Мерчант: *{result['merchant']}*"
+                + (f"\n🆔 MID: `{result['mid']}`" if result.get('mid') else "")
+                + (f"\n🔑 Код: `{result['unique_code']}`" if result.get('unique_code') else "")
+                + f"\n⚡ Приоритет: {result['emoji']} {result['priority_label']}\n"
                 f"📂 Категория: {result['category']}\n"
                 f"👤 Назначено: *{result['assigned_to']}*\n"
                 f"{'📞 Телефон: ' + result['phone'] if result.get('phone') else '📞 Без телефона'}\n"
@@ -1669,16 +1896,64 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
             priority_map = {1: "🔥 Urgent", 2: "🟠 High", 3: "🟡 Normal", 4: "🟢 Low"}
             p = data.get("priority", 3)
 
-            # Сохраняем и спрашиваем телефон
+            # ── Поиск мерчанта в базе ClickUp ───────────────────────────
+            resolved = None
+            candidates = []
+            if merchant and merchant.lower() not in ("не указан", "unknown", ""):
+                try:
+                    candidates = search_merchants_by_name(merchant, limit=5)
+                except Exception as e:
+                    logger.error(f"search_merchants_by_name error: {e}")
+                    candidates = []
+
+            if len(candidates) == 1:
+                resolved = candidates[0]
+                data["merchant_name"] = resolved["name"]
+
             pending_agent_tasks[tg_id] = {
                 "task_data": data,
+                "candidates": candidates,
+                "resolved_merchant": resolved,
                 "created_at": time.time(),
+                "step": "phone" if (resolved is not None or not candidates) else "pick_merchant",
             }
+
+            # Несколько кандидатов — просим выбрать
+            if len(candidates) > 1:
+                names_list = "\n".join(
+                    f"{i+1}. *{c['name']}* — MID: `{c.get('mid') or '—'}`, код: `{c.get('unique_code') or '—'}`"
+                    for i, c in enumerate(candidates)
+                )
+                await update.message.reply_text(
+                    f"📋 *Новая задача:* {title}\n"
+                    f"⚡ {priority_map.get(p, '🟡 Normal')}  📂 {data.get('category', 'Другое')}\n\n"
+                    f"🔎 По запросу *{merchant}* найдено {len(candidates)} мерчантов:\n\n"
+                    f"{names_list}\n\n"
+                    f"Напишите *номер* нужного мерчанта (1-{len(candidates)}) или *0* чтобы создать без привязки.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            # Один мерчант найден
+            if resolved:
+                info_block = (
+                    f"✅ Найден: *{resolved['name']}*\n"
+                    f"🆔 MID: `{resolved.get('mid') or '—'}`\n"
+                    f"🔑 Код: `{resolved.get('unique_code') or '—'}`\n"
+                )
+            # 0 кандидатов — работаем с именем как есть
+            elif merchant and merchant.lower() not in ("не указан", "unknown", ""):
+                info_block = (
+                    f"⚠️ Мерчант *{merchant}* не найден в базе.\n"
+                    f"Задача будет создана с этим именем, но без MID/кода.\n"
+                )
+            else:
+                info_block = f"🏪 Мерчант: *{merchant}*\n"
 
             await update.message.reply_text(
                 f"📋 *Новая задача:*\n\n"
                 f"📝 {title}\n"
-                f"🏪 Мерчант: *{merchant}*\n"
+                f"{info_block}"
                 f"⚡ Приоритет: {priority_map.get(p, '🟡 Normal')}\n"
                 f"📂 Категория: {data.get('category', 'Другое')}\n\n"
                 f"📞 *Укажите номер телефона мерчанта для обратной связи*\n"
