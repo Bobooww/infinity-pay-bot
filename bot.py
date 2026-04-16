@@ -2135,8 +2135,8 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # ── Шаг 1: AI анализирует текст ─────────────────────────────────────
     try:
         resp = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1500,  # больше для массива задач
+            model="claude-sonnet-4-6",  # Sonnet для умного разбора речи агентов (было haiku — тупил)
+            max_tokens=2000,            # больше для массива задач + reasoning
             system=AGENT_AI_PROMPT,
             messages=[{"role": "user", "content": f"Сотрудник ({agent['name']}) написал: {text}"}]
         )
