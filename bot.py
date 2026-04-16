@@ -263,6 +263,54 @@ spam_tracker = {}  # {tg_id: {"count": int, "first_msg": timestamp}}
 
 # ticket_id -> tg_id mapping (replaces fragile description text parsing)
 ticket_to_tg = {}  # {clickup_ticket_id: tg_id (int)}
+
+# ─── Короткие ID тикетов для агентов ─────────────────────────────────────
+# T-001, T-002... легко произносить и набирать
+short_to_clickup = {}  # {"T-042": "86b9f8a1..."}
+clickup_to_short = {}  # обратное — {"86b9f8a1": "T-042"}
+ticket_counter = 0     # последний использованный номер
+
+
+def next_short_ticket_id() -> str:
+    """Генерирует следующий короткий ID: T-001, T-002..."""
+    global ticket_counter
+    ticket_counter += 1
+    return f"T-{ticket_counter:03d}"
+
+
+def register_ticket_short_id(clickup_id: str) -> str:
+    """Регистрирует короткий ID для ClickUp тикета. Идемпотентно."""
+    if clickup_id in clickup_to_short:
+        return clickup_to_short[clickup_id]
+    sid = next_short_ticket_id()
+    short_to_clickup[sid] = clickup_id
+    clickup_to_short[clickup_id] = sid
+    save_state()
+    return sid
+
+
+def resolve_ticket_id(ref: str) -> str | None:
+    """Принимает T-042 / t042 / полный ClickUp ID / последние 8 символов.
+    Возвращает ClickUp ID или None.
+    """
+    if not ref:
+        return None
+    r = ref.strip().upper().replace(" ", "")
+    # Нормализуем "t42" → "T-042", "T42" → "T-042"
+    import re as _re
+    m = _re.match(r"^T-?(\d+)$", r)
+    if m:
+        key = f"T-{int(m.group(1)):03d}"
+        return short_to_clickup.get(key)
+    # Полный ClickUp ID
+    if ref in clickup_to_short:
+        return ref
+    # Последние 8 символов (префикс) — поиск по известным
+    r_lower = ref.lower()
+    for cid in clickup_to_short:
+        if cid.lower().startswith(r_lower) or cid.lower().endswith(r_lower):
+            return cid
+    return None
 SPAM_LIMIT  = 10   # макс 10 сообщений за 60 сек
 SPAM_WINDOW = 60
 
@@ -359,15 +407,21 @@ def cleanup_faq_cache():
 
 # Persistence functions
 def load_state():
-    """Load merchant_cache, ticket_to_tg, notification_cache from disk."""
-    global merchant_cache, ticket_to_tg, notification_cache
+    """Load merchant_cache, ticket_to_tg, notification_cache, short IDs from disk."""
+    global merchant_cache, ticket_to_tg, notification_cache, short_to_clickup, clickup_to_short, ticket_counter
     try:
         if STATE_FILE.exists():
             data = json.loads(STATE_FILE.read_text(encoding='utf-8'))
             merchant_cache.update({int(k): v for k, v in data.get('merchant_cache', {}).items()})
             ticket_to_tg.update(data.get('ticket_to_tg', {}))
             notification_cache.update(data.get('notification_cache', {}))
-            logger.info(f'State loaded: {len(merchant_cache)} merchants, {len(ticket_to_tg)} tickets')
+            short_to_clickup.update(data.get('short_to_clickup', {}))
+            clickup_to_short.update(data.get('clickup_to_short', {}))
+            ticket_counter = data.get('ticket_counter', 0)
+            logger.info(
+                f'State loaded: {len(merchant_cache)} merchants, '
+                f'{len(ticket_to_tg)} tickets, short_ids counter={ticket_counter}'
+            )
     except Exception as e:
         logger.error(f'Failed to load state: {e}')
 
@@ -380,6 +434,9 @@ def save_state():
             'merchant_cache': {str(k): v for k, v in merchant_cache.items()},
             'ticket_to_tg': ticket_to_tg,
             'notification_cache': notification_cache,
+            'short_to_clickup': short_to_clickup,
+            'clickup_to_short': clickup_to_short,
+            'ticket_counter': ticket_counter,
             'saved_at': datetime.utcnow().isoformat(),
         }
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -791,7 +848,8 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
     if r.status_code in (200, 201):
         task = r.json()
         ticket_id = task["id"]
-        logger.info(f"Тикет создан: {ticket_id}")
+        short_id = register_ticket_short_id(ticket_id)
+        logger.info(f"Тикет создан: {ticket_id} (short: {short_id})")
         stats["tickets_created"] += 1
 
         # Теперь ставим dropdown поля по одному — этот endpoint возвращает
@@ -1846,9 +1904,11 @@ async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None, 
             if not ok:
                 logger.error(f"  ✗✗ {field_name}: ВСЕ попытки провалились")
 
+        short_id = register_ticket_short_id(task_id)
         return {
             "success":        True,
             "task_id":        task_id,
+            "short_id":       short_id,
             "assigned_to":    assigned_agent["name"],
             "emoji":          emoji,
             "priority_label": priority_label,
@@ -2056,7 +2116,7 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         if result.get("success"):
             await update.message.reply_text(
-                f"✅ *Задача создана в ClickUp!*\n\n"
+                f"✅ *Задача создана!*  `{result.get('short_id','?')}`\n\n"
                 f"{result['emoji']} *{result['title']}*\n"
                 f"🏪 Мерчант: *{result['merchant']}*"
                 + (f"\n🆔 MID: `{result['mid']}`" if result.get('mid') else "")
@@ -2064,8 +2124,8 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 + f"\n⚡ Приоритет: {result['emoji']} {result['priority_label']}\n"
                 f"📂 Категория: {result['category']}\n"
                 f"👤 Назначено: *{result['assigned_to']}*\n"
-                f"{'📞 Телефон: ' + result['phone'] if result.get('phone') else '📞 Без телефона'}\n"
-                f"🔖 ID: `{result['task_id'][:8]}`",
+                f"{'📞 Телефон: ' + result['phone'] if result.get('phone') else '📞 Без телефона'}\n\n"
+                f"_Команды: /delete {result.get('short_id','?')} · /priority {result.get('short_id','?')} urgent · /status {result.get('short_id','?')} done_",
                 parse_mode="Markdown"
             )
         else:
@@ -2201,10 +2261,9 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 code_part = f" [`{res.get('unique_code')}`]" if res.get('unique_code') else ""
                 mid_part  = f" MID:`{res.get('mid')}`" if res.get('mid') else ""
                 summary_lines.append(
-                    f"{i}. {res['emoji']} *{res['title']}*\n"
+                    f"{i}. `{res.get('short_id','?')}`  {res['emoji']} *{res['title']}*\n"
                     f"   🏪 {mname}{code_part}{mid_part}\n"
-                    f"   📂 {res['category']}  👤 {res['assigned_to']}\n"
-                    f"   🔖 `{res['task_id'][:8]}`"
+                    f"   📂 {res['category']}  👤 {res['assigned_to']}"
                 )
             await update.message.reply_text("\n\n".join(summary_lines), parse_mode="Markdown")
             return
@@ -2240,7 +2299,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if tg_id in agent_sessions:
         await update.message.reply_text(
             "🛡️ *Команды агента/ISO:*\n\n"
-            "Просто напишите задачу или вопрос — AI поймёт.\n\n"
+            "Просто напишите задачу/голосовое — AI поймёт.\n"
+            "Несколько задач в одном сообщении → отдельные тикеты.\n\n"
+            "*Тикеты:*\n"
+            "/tickets — список последних\n"
+            "/ticket T-042 — инфа по тикету\n"
+            "/delete T-042 — удалить\n"
+            "/priority T-042 urgent — сменить приоритет (urgent/high/normal/low)\n"
+            "/status T-042 done — сменить статус\n\n"
+            "*Мерчанты:*\n"
+            "/addmerchant — добавить мерчанта\n\n"
+            "*Остальное:*\n"
             "/stats — статистика\n"
             "/logout — выйти\n"
             "/close\\_session — закрыть сессию",
@@ -2383,6 +2452,218 @@ async def check_ticket_updates(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# ТИКЕТ-МЕНЕДЖМЕНТ (ТОЛЬКО АГЕНТЫ/ISO)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _agent_only_check(update: Update) -> bool:
+    """Возвращает True если можно продолжать. Иначе отвечает и возвращает False."""
+    tg_id = update.effective_user.id
+    if tg_id not in agent_sessions:
+        await update.message.reply_text(
+            "🔒 Команда только для агентов/ISO.\nВойдите через /login CODE"
+        )
+        return False
+    return True
+
+
+async def tickets_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Список последних тикетов с короткими ID."""
+    if not await _agent_only_check(update):
+        return
+    if not short_to_clickup:
+        await update.message.reply_text("Пока нет тикетов в системе.")
+        return
+    # Последние 15 по убыванию номера
+    items = sorted(short_to_clickup.items(),
+                   key=lambda x: int(x[0].split("-")[1]), reverse=True)[:15]
+    lines = ["📋 *Последние тикеты:*\n"]
+    for sid, cid in items:
+        try:
+            r = httpx.get(f"{CLICKUP_BASE}/task/{cid}", headers=CLICKUP_HEADERS, timeout=5)
+            if r.status_code == 200:
+                task = r.json()
+                name = task.get("name", "?")[:60]
+                status = task.get("status", {}).get("status", "?")
+                lines.append(f"`{sid}`  {name}\n  _status: {status}_")
+            else:
+                lines.append(f"`{sid}`  _(недоступен)_")
+        except Exception:
+            lines.append(f"`{sid}`  _(ошибка)_")
+    await update.message.reply_text(
+        "\n\n".join(lines) + "\n\n_Команды: /ticket T-001 · /delete T-001 · /priority T-001 urgent · /status T-001 done_",
+        parse_mode="Markdown"
+    )
+
+
+async def ticket_info_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Инфа по тикету: /ticket T-042"""
+    if not await _agent_only_check(update):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Использование: /ticket T-042")
+        return
+    ref = args[0]
+    cid = resolve_ticket_id(ref)
+    if not cid:
+        await update.message.reply_text(f"❌ Тикет `{ref}` не найден. /tickets — список.",
+                                        parse_mode="Markdown")
+        return
+    r = httpx.get(f"{CLICKUP_BASE}/task/{cid}", headers=CLICKUP_HEADERS, timeout=10)
+    if r.status_code != 200:
+        await update.message.reply_text(f"❌ ClickUp вернул {r.status_code}")
+        return
+    task = r.json()
+    sid = clickup_to_short.get(cid, ref)
+    name = task.get("name", "?")
+    status = task.get("status", {}).get("status", "?")
+    pr = task.get("priority") or {}
+    pr_name = pr.get("priority", "?") if isinstance(pr, dict) else str(pr)
+    url = task.get("url", "")
+    assignees = ", ".join(a.get("username", "?") for a in task.get("assignees", [])) or "—"
+    desc = (task.get("description") or "")[:500]
+    await update.message.reply_text(
+        f"🔖 `{sid}`  *{name}*\n\n"
+        f"📊 Статус: *{status}*\n"
+        f"⚡ Приоритет: *{pr_name}*\n"
+        f"👤 Назначено: {assignees}\n\n"
+        f"{desc}\n\n"
+        f"🔗 {url}",
+        parse_mode="Markdown",
+        disable_web_page_preview=True
+    )
+
+
+async def delete_ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет тикет: /delete T-042"""
+    if not await _agent_only_check(update):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("Использование: /delete T-042")
+        return
+    ref = args[0]
+    cid = resolve_ticket_id(ref)
+    if not cid:
+        await update.message.reply_text(f"❌ Тикет `{ref}` не найден.", parse_mode="Markdown")
+        return
+    sid = clickup_to_short.get(cid, ref)
+    r = httpx.delete(f"{CLICKUP_BASE}/task/{cid}", headers=CLICKUP_HEADERS, timeout=10)
+    if r.status_code in (200, 204):
+        # Чистим локальные маппинги
+        short_to_clickup.pop(sid, None)
+        clickup_to_short.pop(cid, None)
+        ticket_to_tg.pop(cid, None)
+        save_state()
+        await update.message.reply_text(f"🗑 Тикет `{sid}` удалён.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"❌ Не удалось удалить `{sid}`: {r.status_code} {r.text[:200]}",
+            parse_mode="Markdown"
+        )
+
+
+async def priority_ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меняет приоритет: /priority T-042 urgent|high|normal|low"""
+    if not await _agent_only_check(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Использование: /priority T-042 urgent|high|normal|low"
+        )
+        return
+    ref, new_pri_raw = args[0], args[1].lower()
+    pri_map = {"urgent": 1, "срочно": 1, "high": 2, "важно": 2,
+               "normal": 3, "обычный": 3, "low": 4, "низкий": 4}
+    if new_pri_raw not in pri_map:
+        await update.message.reply_text(
+            "Приоритет: urgent / high / normal / low"
+        )
+        return
+    cid = resolve_ticket_id(ref)
+    if not cid:
+        await update.message.reply_text(f"❌ Тикет `{ref}` не найден.", parse_mode="Markdown")
+        return
+    sid = clickup_to_short.get(cid, ref)
+    new_pri = pri_map[new_pri_raw]
+    # 1) Обновляем built-in priority
+    r = httpx.put(
+        f"{CLICKUP_BASE}/task/{cid}",
+        headers=CLICKUP_HEADERS,
+        json={"priority": new_pri}
+    )
+    built_in_ok = r.status_code in (200, 201)
+    # 2) Обновляем кастомный dropdown Priority Level
+    pri_label = {1: "Urgent", 2: "High", 3: "Normal", 4: "Low"}[new_pri]
+    cf = build_custom_field(
+        ["Priority Level", "Priority", "Приоритет", "Уровень приоритета"],
+        pri_label, dropdown=True
+    )
+    dropdown_ok = False
+    if cf and cf.get("_dropdown"):
+        url = f"{CLICKUP_BASE}/task/{cid}/field/{cf['id']}"
+        if cf.get("value"):
+            rr = httpx.post(url, headers=CLICKUP_HEADERS, json={"value": cf["value"]})
+            dropdown_ok = rr.status_code in (200, 201)
+        if not dropdown_ok and cf.get("orderindex") is not None:
+            try:
+                oi = int(cf["orderindex"])
+            except (TypeError, ValueError):
+                oi = cf["orderindex"]
+            rr = httpx.post(url, headers=CLICKUP_HEADERS, json={"value": oi})
+            dropdown_ok = rr.status_code in (200, 201)
+
+    emoji = {1: "🔴", 2: "🟠", 3: "🟡", 4: "🟢"}[new_pri]
+    if built_in_ok or dropdown_ok:
+        await update.message.reply_text(
+            f"{emoji} Приоритет `{sid}` → *{pri_label}*",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Не удалось обновить приоритет: {r.status_code} {r.text[:200]}",
+            parse_mode="Markdown"
+        )
+
+
+async def status_ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меняет статус: /status T-042 open|in progress|done|closed"""
+    if not await _agent_only_check(update):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Использование: /status T-042 <статус>\n"
+            "Примеры: open, in progress, done, closed, complete"
+        )
+        return
+    ref = args[0]
+    new_status = " ".join(args[1:]).strip()
+    cid = resolve_ticket_id(ref)
+    if not cid:
+        await update.message.reply_text(f"❌ Тикет `{ref}` не найден.", parse_mode="Markdown")
+        return
+    sid = clickup_to_short.get(cid, ref)
+    r = httpx.put(
+        f"{CLICKUP_BASE}/task/{cid}",
+        headers=CLICKUP_HEADERS,
+        json={"status": new_status}
+    )
+    if r.status_code in (200, 201):
+        await update.message.reply_text(
+            f"📊 Статус `{sid}` → *{new_status}*",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Не удалось. ClickUp: {r.status_code} {r.text[:250]}\n"
+            f"_Доступные статусы зависят от настроек листа в ClickUp._",
+            parse_mode="Markdown"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2416,6 +2697,11 @@ def main():
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("close_session", close_session_command))
     app.add_handler(CommandHandler("addmerchant", addmerchant_command))
+    app.add_handler(CommandHandler("tickets", tickets_command))
+    app.add_handler(CommandHandler("delete", delete_ticket_command))
+    app.add_handler(CommandHandler("priority", priority_ticket_command))
+    app.add_handler(CommandHandler("status", status_ticket_command))
+    app.add_handler(CommandHandler("ticket", ticket_info_command))
 
     # Голосовые
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
