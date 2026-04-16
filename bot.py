@@ -676,23 +676,65 @@ def add_comment_to_ticket(ticket_id: str, comment: str):
 
 async def _create_and_confirm_ticket(update: Update, session: dict, merchant: dict, phone: str = None):
     """Создаёт тикет в ClickUp и уведомляет мерчанта."""
-    full_message = "\n".join(session.get("messages", [])).strip()
-    if not full_message:
-        full_message = "Обращение без деталей (мерчант попросил связаться)"
+    # Отсеиваем "мета"-сообщения (нет/саппорт/2 и т.п.) — это не часть проблемы
+    META_WORDS = {
+        "нет", "no", "не", "неа", "nope", "ne", "yox", "nein",
+        "саппорт", "support", "заявка", "2", "не помог", "не помогло",
+        "не помогает", "не работает", "не получилось", "не получается",
+        "не понял", "не понятно", "позови человека", "нужен человек",
+        "отдай саппорту", "отдай специалисту", "свяжитесь", "позвоните",
+    }
+    all_msgs = session.get("messages", [])
+    problem_msgs = [m for m in all_msgs
+                    if m.strip().lower() not in META_WORDS
+                    and not (len(m.strip()) <= 6 and m.strip().lower() in META_WORDS)]
+    if not problem_msgs:
+        problem_msgs = all_msgs  # fallback: всё же лучше чем пусто
+
+    problem_text = "\n".join(problem_msgs).strip() or "Обращение без деталей"
 
     await update.message.reply_text("⏳ Анализирую переписку и создаю заявку...")
 
+    # Оборачиваем в явный контекст, чтобы Sonnet не путал "нет" с частью проблемы
+    context_msg = (
+        f"Мерчант обратился в поддержку Infinity Pay. Суть обращения:\n"
+        f"«{problem_text}»\n\n"
+        f"AI-бот попытался помочь, но мерчант попросил создать заявку "
+        f"для специалиста (ответил отрицательно на вопрос 'Помогло?').\n\n"
+        f"Задача: создай профессиональный тикет на русском. "
+        f"В ticket_title — чистое название проблемы БЕЗ слов 'нет/саппорт/помогите'. "
+        f"В ticket_description — что нужно сделать команде саппорта."
+    )
+
     # ВСЕГДА используем Sonnet для тикета — он лучше чистит опечатки,
     # пишет профессиональное название и описание для команды саппорта.
-    # +несколько центов на тикет, но гораздо чище результат в ClickUp.
-    analysis = analyze_with_claude(merchant, full_message, use_sonnet=True)
+    analysis = analyze_with_claude(merchant, context_msg, use_sonnet=True)
+
+    # ── Post-processing safety: убираем мета-слова из ticket_title ──
+    def _clean_title(t: str) -> str:
+        import re
+        if not t:
+            return t
+        t = t.strip().rstrip(".,!?")
+        # Убираем trailing мета-слова ("...цены нет" → "...цены")
+        for _ in range(3):
+            m = re.search(r"[\s\-—,]+(нет|неа|no|nope|не помог[аело]*|не помогло|не работает|саппорт|support)\s*$",
+                          t, flags=re.IGNORECASE)
+            if not m:
+                break
+            t = t[:m.start()].rstrip(" -—,.")
+        return t.strip()
+
+    if analysis.get("ticket_title"):
+        analysis["ticket_title"] = _clean_title(analysis["ticket_title"])
+    if analysis.get("escalation_summary"):
+        analysis["escalation_summary"] = _clean_title(analysis["escalation_summary"])
 
     # Если по анализу эскалация не нужна — всё равно создаём тикет
-    # (мерчант явно попросил саппорта)
     if not analysis.get("escalation_summary"):
-        analysis["escalation_summary"] = full_message[:80]
+        analysis["escalation_summary"] = problem_text[:80]
 
-    ticket_id = create_support_ticket(merchant, full_message, analysis, phone)
+    ticket_id = create_support_ticket(merchant, problem_text, analysis, phone)
 
     if ticket_id:
         session["ticket_id"] = ticket_id
