@@ -21,6 +21,8 @@ import asyncio
 import time
 import tempfile
 import signal
+import queue
+import threading
 from pathlib import Path
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -50,6 +52,103 @@ CLICKUP_LIST_MERCHANTS = os.environ["CLICKUP_LIST_MERCHANTS_ID"]
 
 # Telegram группа поддержки (chat_id, задаётся в .env)
 SUPPORT_GROUP_CHAT_ID = os.environ.get("SUPPORT_GROUP_CHAT_ID", "")
+
+# Минимальный уровень логов, которые дублируются в TG-группу.
+# По умолчанию WARNING (чтобы не спамить INFO каждую секунду).
+# Можно переопределить через env: LOG_TO_TELEGRAM_LEVEL=INFO|WARNING|ERROR
+_LOG_TG_LEVEL_NAME = os.environ.get("LOG_TO_TELEGRAM_LEVEL", "WARNING").upper()
+_LOG_TG_LEVEL = getattr(logging, _LOG_TG_LEVEL_NAME, logging.WARNING)
+
+
+# ─── Telegram Log Handler ─────────────────────────────────────────────────
+class TelegramLogHandler(logging.Handler):
+    """Дублирует логи (WARNING+) в Telegram-группу поддержки.
+
+    Работает через фоновый поток и очередь, чтобы не блокировать asyncio.
+    Rate-limit: ~50 msg/min (Telegram group limit — 20 msg/min, но с
+    disable_notification лимит мягче). Переполнение очереди — тихо дропаем.
+    """
+    _EMOJI = {
+        "CRITICAL": "🆘",
+        "ERROR":    "🔴",
+        "WARNING":  "🟡",
+        "INFO":     "🔵",
+        "DEBUG":    "⚪️",
+    }
+    # Шумные логгеры — не дублируем в TG (httpx каждого запроса и т.д.)
+    _NOISY_PREFIXES = (
+        "httpx", "httpcore", "urllib3", "anthropic._base_client",
+        "telegram.ext._application", "telegram.ext._updater",
+        "apscheduler",
+    )
+
+    def __init__(self, bot_token: str, chat_id: str, level=logging.WARNING):
+        super().__init__(level=level)
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self._q: "queue.Queue[str]" = queue.Queue(maxsize=500)
+        self._thread = threading.Thread(
+            target=self._worker, daemon=True, name="TelegramLogHandler"
+        )
+        self._thread.start()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if any(record.name.startswith(p) for p in self._NOISY_PREFIXES):
+                return
+            msg = self.format(record)
+            emoji = self._EMOJI.get(record.levelname, "")
+            # Plain text — без Markdown, чтобы не ломалось на спецсимволах
+            text = (
+                f"{emoji} {record.levelname} | {record.name}:{record.lineno}\n"
+                f"{msg}"
+            )
+            if len(text) > 4000:
+                text = text[:3990] + "…[cut]"
+            try:
+                self._q.put_nowait(text)
+            except queue.Full:
+                pass  # очередь переполнена — дропаем тихо
+        except Exception:
+            # Никогда не падаем — это бы сломало остальное логирование
+            pass
+
+    def _worker(self) -> None:
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        while True:
+            try:
+                text = self._q.get()
+                httpx.post(
+                    url,
+                    json={
+                        "chat_id": self.chat_id,
+                        "text": text,
+                        "disable_notification": True,
+                        "disable_web_page_preview": True,
+                    },
+                    timeout=5.0,
+                )
+            except Exception:
+                pass  # молча — любая ошибка здесь = риск рекурсии логов
+            time.sleep(1.2)
+
+
+def setup_telegram_logging() -> None:
+    """Подключает TelegramLogHandler к root-логгеру, если SUPPORT_GROUP_CHAT_ID задан."""
+    if not SUPPORT_GROUP_CHAT_ID:
+        logger.info("SUPPORT_GROUP_CHAT_ID не задан — логи в TG отключены.")
+        return
+    handler = TelegramLogHandler(
+        bot_token=TELEGRAM_TOKEN,
+        chat_id=SUPPORT_GROUP_CHAT_ID,
+        level=_LOG_TG_LEVEL,
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(handler)
+    logger.info(
+        f"📡 Логи дублируются в TG-группу {SUPPORT_GROUP_CHAT_ID} "
+        f"(уровень: {_LOG_TG_LEVEL_NAME})"
+    )
 
 # OpenAI API для Whisper (голосовые)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -2672,6 +2771,8 @@ def main():
     print(" Infinity Pay Bot v2 — Starting...")
     print("═══════════════════════════════════════════\n")
 
+    # Дублируем логи (WARNING+) в TG-группу поддержки
+    setup_telegram_logging()
 
     load_state()
 
