@@ -123,6 +123,9 @@ NOTIFICATION_CACHE_TTL = 86400  # 24 ÑÐ°ÑÐ°
 
 # âââ ÐÐ½ÑÐ¸ÑÐ¿Ð°Ð¼ ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 spam_tracker = {}  # {tg_id: {"count": int, "first_msg": timestamp}}
+
+# ticket_id -> tg_id mapping (replaces fragile description text parsing)
+ticket_to_tg = {}  # {clickup_ticket_id: tg_id (int)}
 SPAM_LIMIT  = 10   # Ð¼Ð°ÐºÑ 10 ÑÐ¾Ð¾Ð±ÑÐµÐ½Ð¸Ð¹ Ð·Ð° 60 ÑÐµÐº
 SPAM_WINDOW = 60
 
@@ -416,6 +419,14 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
         ticket_id = task["id"]
         logger.info(f"Ð¢Ð¸ÐºÐµÑ ÑÐ¾Ð·Ð´Ð°Ð½: {ticket_id}")
         stats["tickets_created"] += 1
+
+        # Store ticket -> tg_id for reliable notification routing (replaces description parsing)
+        tg_id_val = merchant.get("telegram_id")
+        if tg_id_val:
+            try:
+                ticket_to_tg[ticket_id] = int(tg_id_val)
+            except (ValueError, TypeError):
+                pass
 
         # ÐÑÐ±Ð»Ð¸ÑÑÐµÐ¼ Ð² TG-Ð³ÑÑÐ¿Ð¿Ñ Ð¿Ð¾Ð´Ð´ÐµÑÐ¶ÐºÐ¸
         if SUPPORT_GROUP_CHAT_ID:
@@ -1157,14 +1168,8 @@ async def check_ticket_updates(context: ContextTypes.DEFAULT_TYPE):
             task_name   = task["name"]
 
             # ÐÑÐµÐ¼ Telegram ID Ð¼ÐµÑÑÐ°Ð½ÑÐ° Ð² Ð¾Ð¿Ð¸ÑÐ°Ð½Ð¸Ð¸
-            desc  = task.get("description", "")
-            tg_id = None
-            if "Telegram ID:** " in desc:
-                try:
-                    tg_part = desc.split("Telegram ID:** ")[1].split("\n")[0].strip()
-                    tg_id = int(tg_part) if tg_part.isdigit() else None
-                except:
-                    pass
+            # Use ticket_to_tg mapping (populated at ticket creation)
+            tg_id = ticket_to_tg.get(task_id)
 
             if not tg_id:
                 continue
