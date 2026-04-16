@@ -60,6 +60,81 @@ CLICKUP_HEADERS = {
 }
 CLICKUP_BASE = "https://api.clickup.com/api/v2"
 
+# Кеш полей ClickUp — обновляется при старте и по требованию
+_clickup_fields_cache = {"tickets": None, "tickets_fetched_at": 0}
+_CLICKUP_FIELDS_TTL = 3600  # 1 час
+
+
+def get_ticket_fields(force: bool = False) -> dict:
+    """Динамически получает все custom fields листа тикетов.
+    Ключ — имя поля в lowercase, значение — {id, type, options: {name_lower: uuid}}.
+    """
+    now = time.time()
+    if (not force and _clickup_fields_cache["tickets"] is not None
+            and now - _clickup_fields_cache["tickets_fetched_at"] < _CLICKUP_FIELDS_TTL):
+        return _clickup_fields_cache["tickets"]
+    try:
+        r = httpx.get(
+            f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/field",
+            headers=CLICKUP_HEADERS,
+            timeout=10,
+        )
+        if r.status_code != 200:
+            logger.error(f"get_ticket_fields: {r.status_code} {r.text}")
+            return _clickup_fields_cache["tickets"] or {}
+        result = {}
+        for f in r.json().get("fields", []):
+            name = (f.get("name") or "").strip()
+            if not name:
+                continue
+            options = {}
+            for opt in (f.get("type_config") or {}).get("options", []) or []:
+                opt_name = (opt.get("name") or "").strip().lower()
+                opt_id   = opt.get("id") or opt.get("orderindex")
+                if opt_name and opt_id is not None:
+                    options[opt_name] = opt_id
+            result[name.lower()] = {
+                "id":      f.get("id"),
+                "type":    f.get("type"),
+                "name":    name,
+                "options": options,
+            }
+        _clickup_fields_cache["tickets"] = result
+        _clickup_fields_cache["tickets_fetched_at"] = now
+        logger.info(f"ClickUp поля загружены ({len(result)}): {list(result.keys())}")
+        return result
+    except Exception as e:
+        logger.error(f"get_ticket_fields exception: {e}")
+        return _clickup_fields_cache["tickets"] or {}
+
+
+def build_custom_field(name_candidates: list, value, dropdown: bool = False) -> dict | None:
+    """Ищет поле по списку возможных имён и возвращает payload элемент для custom_fields."""
+    fields = get_ticket_fields()
+    if not fields:
+        return None
+    field = None
+    for nm in name_candidates:
+        f = fields.get(nm.lower())
+        if f:
+            field = f
+            break
+    if not field:
+        return None
+    if dropdown:
+        val_key = str(value).strip().lower()
+        uuid = field["options"].get(val_key)
+        if uuid is None:
+            # Попробуем частичное совпадение
+            for opt_name, opt_id in field["options"].items():
+                if val_key in opt_name or opt_name in val_key:
+                    uuid = opt_id
+                    break
+        if uuid is None:
+            return None
+        return {"id": field["id"], "value": uuid}
+    return {"id": field["id"], "value": str(value)}
+
 # ─── ClickUp Custom Field IDs (из clickup_ids.json) ─────────────────────
 TICKET_FIELDS = {
     "source":         "cce340eb-1ad3-4393-99db-8a4479a4adf8",
@@ -470,27 +545,48 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
 👤 Назначено: {assigned_agent['name']}{phone_line}
 """
 
-    # Custom fields — dropdown поля нужно отправлять как option UUID
-    cat_uuid = CATEGORY_OPTIONS.get(category, CATEGORY_OPTIONS.get("Other", ""))
-    pri_uuid = PRIORITY_OPTIONS.get(priority_label, PRIORITY_OPTIONS.get("Normal", ""))
-    src_uuid = SOURCE_OPTIONS.get("Merchant Request", "")
-    chn_uuid = CHANNEL_OPTIONS.get("Telegram", "")
+    # Custom fields — динамически находим ВСЕ подходящие поля в ClickUp
+    merchant_name_variants = [merchant.get('name', '')]
+    custom_fields = []
 
-    custom_fields = [
-        {"id": TICKET_FIELDS["merchant"],        "value": merchant['name']},
-        {"id": MERCHANT_SHORT_TEXT_FIELD_ID,     "value": merchant['name']},   # "Мерчант" short_text
-        {"id": TICKET_FIELDS["mid"],             "value": merchant.get('mid', '')},
-    ]
-    if cat_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["category"],       "value": cat_uuid})
-    if pri_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["priority_level"], "value": pri_uuid})
-    if src_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["source"],         "value": src_uuid})
-    if chn_uuid:
-        custom_fields.append({"id": TICKET_FIELDS["channel"],        "value": chn_uuid})
+    # Мерчант — все возможные варианты названия поля
+    for name_candidate in ["Merchant", "Мерчант", "Merchant Name", "Название мерчанта", "Мерчант Name"]:
+        cf = build_custom_field([name_candidate], merchant.get('name', ''))
+        if cf and not any(x["id"] == cf["id"] for x in custom_fields):
+            custom_fields.append(cf)
+
+    # MID
+    cf = build_custom_field(["MID", "Merchant ID"], merchant.get('mid', ''))
+    if cf: custom_fields.append(cf)
+
+    # Category dropdown — маппинг AI-категорий → ClickUp options (с fallback)
+    category_map = {
+        "Terminal": "Hardware", "Billing": "Account", "Chargeback": "Account",
+        "Fraud": "Account", "Compliance": "Account", "General": "Other",
+    }
+    cat_value = category_map.get(category, category)
+    cf = build_custom_field(["Category", "Категория"], cat_value, dropdown=True)
+    if cf: custom_fields.append(cf)
+
+    # Priority Level dropdown
+    cf = build_custom_field(
+        ["Priority Level", "Priority", "Приоритет", "Уровень приоритета"],
+        priority_label, dropdown=True
+    )
+    if cf: custom_fields.append(cf)
+
+    # Source dropdown
+    cf = build_custom_field(["Source", "Источник"], "Merchant Request", dropdown=True)
+    if cf: custom_fields.append(cf)
+
+    # Channel dropdown
+    cf = build_custom_field(["Channel", "Канал"], "Telegram", dropdown=True)
+    if cf: custom_fields.append(cf)
+
+    # Phone
     if phone:
-        custom_fields.append({"id": TICKET_FIELDS["phone"], "value": phone})
+        cf = build_custom_field(["Phone", "Телефон"], phone)
+        if cf: custom_fields.append(cf)
 
     payload = {
         "name":          task_name,
@@ -499,6 +595,9 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
         "assignees":     [assigned_agent["id"]],
         "custom_fields": custom_fields,
     }
+
+    logger.info(f"Creating ticket with {len(custom_fields)} custom fields: "
+                f"{[f['id'][:8] for f in custom_fields]}")
 
     r = httpx.post(
         f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
@@ -565,14 +664,20 @@ def add_comment_to_ticket(ticket_id: str, comment: str):
 
 async def _create_and_confirm_ticket(update: Update, session: dict, merchant: dict, phone: str = None):
     """Создаёт тикет в ClickUp и уведомляет мерчанта."""
-    analysis = session.get("pending_analysis") or session.get("last_analysis") or {}
-    full_message = "\n".join(session.get("messages", []))
+    full_message = "\n".join(session.get("messages", [])).strip()
+    if not full_message:
+        full_message = "Обращение без деталей (мерчант попросил связаться)"
 
-    # Если анализа нет — делаем быстрый
-    if not analysis:
-        analysis = analyze_with_claude(merchant, full_message)
+    await update.message.reply_text("⏳ Анализирую переписку и создаю заявку...")
 
-    await update.message.reply_text("⏳ Создаю заявку...")
+    # ВСЕГДА делаем свежий анализ всей переписки, чтобы тикет получил
+    # корректное название/категорию/приоритет на основе полного контекста
+    analysis = analyze_with_claude(merchant, full_message)
+
+    # Если по анализу эскалация не нужна — всё равно создаём тикет
+    # (мерчант явно попросил саппорта)
+    if not analysis.get("escalation_summary"):
+        analysis["escalation_summary"] = full_message[:80]
 
     ticket_id = create_support_ticket(merchant, full_message, analysis, phone)
 
@@ -1040,11 +1145,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if session.get("mode") == "self_help":
         escalation_triggers = ("саппорт", "support", "заявка", "2", "не помогло",
                                "не работает", "всё равно", "все равно", "не понял",
-                               "не понятно", "создай заявку", "нужен человек")
+                               "не понятно", "создай заявку", "нужен человек",
+                               "отдай саппорту", "отдай специалисту", "позови человека")
         msg_lower = message_text.lower().strip()
         if msg_lower in escalation_triggers or any(t in msg_lower for t in escalation_triggers):
             session["mode"] = "support"
             session["awaiting_phone"] = True
+            # ВАЖНО: добавляем это сообщение в сессию — оно содержит контекст эскалации
+            session["messages"].append(message_text)
+            # Сбрасываем старый анализ — _create_and_confirm_ticket сделает свежий
+            session["last_analysis"] = None
+            session["pending_analysis"] = None
             await update.message.reply_text(
                 "📞 Хорошо, создам заявку для специалиста!\n\n"
                 "Укажите телефон для связи или напишите *пропустить*:",
@@ -1616,6 +1727,12 @@ def main():
 
 
     load_state()
+
+    # Прогреваем кеш полей ClickUp — чтобы первый же тикет правильно заполнил поля
+    try:
+        get_ticket_fields(force=True)
+    except Exception as e:
+        logger.error(f"Не удалось загрузить поля ClickUp при старте: {e}")
 
     def _sigterm(signum, frame):
         logger.info("SIGTERM: saving state...")
