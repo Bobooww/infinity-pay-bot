@@ -920,8 +920,8 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         import json as _json
         raw = resp.content[0].text.strip()
-        if raw.startswith("\`\`\`"):
-            raw = raw.split("\n", 1)[1].rsplit("\`\`\`", 1)[0].strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
         data = _json.loads(raw)
         intent = data.get("intent", "other")
 
