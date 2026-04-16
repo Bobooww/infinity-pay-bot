@@ -67,8 +67,7 @@ SUPPORT_AGENTS = [
 
 # ─── Секретные коды для логина агентов/ISO ──────────────────────────────────
 AGENT_CODES = {
-    "AGENT-001": {"role": "agent", "name": "Support 1", "clickup_id": 94469635},
-    "AGENT-002": {"role": "agent", "name": "Support 2", "clickup_id": 94469636},
+    "IAMAGENT": {"role": "agent", "name": "Infinity Pay Staff", "clickup_id": None},
     "ISO-MASTER": {"role": "iso", "name": "Shams (ISO Owner)", "clickup_id": None},
 }
 
