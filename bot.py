@@ -693,7 +693,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = get_session(tg_id)
     session["messages"].append(message_text)
 
-    # Если есть активный тикет — добавляем комментарий вместо нового тикета
+    # Если есть активный тикет — добавляем комментарий
     if session.get("ticket_id"):
         add_comment_to_ticket(session["ticket_id"], f"[Мерчант] {message_text}")
         await update.message.reply_text(
@@ -701,40 +701,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text("⏳ Обрабатываю запрос...")
+    # ── Ожидаем выбор: самому решить или саппорт ──────────────────────────
+    if session.get("awaiting_choice"):
+        choice = message_text.lower().strip()
+        if choice in ("1", "сам", "самому", "помочь", "решить"):
+            session["awaiting_choice"] = False
+            session["mode"] = "self_help"
+            await update.message.reply_text("⏳ Анализирую ваш вопрос...")
+            full_message = "\n".join(session["messages"])
+            analysis = analyze_with_claude(merchant, full_message)
+            stats["ai_direct_answers"] += 1
+            await update.message.reply_text(analysis["response_to_merchant"])
+            await update.message.reply_text(
+                "💡 Помогло? Если нет — напишите *2* и мы создадим заявку для саппорта.",
+                parse_mode="Markdown"
+            )
+            return
+        elif choice in ("2", "саппорт", "поддержка", "задача", "агент"):
+            session["awaiting_choice"] = False
+            session["mode"] = "support"
+            await update.message.reply_text("⏳ Создаю заявку для саппорта...")
+            full_message = "\n".join(session["messages"])
+            analysis = analyze_with_claude(merchant, full_message)
+            stats["escalations"] += 1
+            ticket_id = create_support_ticket(merchant, full_message, analysis)
+            if ticket_id:
+                session["ticket_id"] = ticket_id
+                emoji = PRIORITY_EMOJI.get(analysis.get("priority", "Normal"), "🟡")
+                await update.message.reply_text(
+                    f"✅ *Заявка создана!*\n\n"
+                    f"{emoji} Приоритет: *{analysis.get('priority')}*\n"
+                    f"📁 Категория: *{analysis.get('category')}*\n\n"
+                    f"Специалист свяжется с вами в ближайшее время.\n"
+                    f"Номер: `{ticket_id[:8]}`\n\n"
+                    f"_Можете дополнить — просто напишите ещё._",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text("✅ Запрос получен. Специалист свяжется с вами.")
+            return
+        else:
+            # Не понял выбор — переспрашиваем
+            await update.message.reply_text(
+                "Напишите *1* или *2*:\n\n"
+                "1️⃣ — Помочь решить самому\n"
+                "2️⃣ — Отправить задачу саппорту",
+                parse_mode="Markdown"
+            )
+            return
 
-    # Анализ через гибридный AI
-    full_message = "\n".join(session["messages"])
-    analysis = analyze_with_claude(merchant, full_message)
-
-    logger.info(
-        f"[{merchant['name']}] confidence={analysis['confidence']} "
-        f"escalate={analysis['should_escalate']} category={analysis['category']}"
-    )
-
-    if not analysis["should_escalate"] and analysis["confidence"] >= 85:
-        stats["ai_direct_answers"] += 1
-        await update.message.reply_text(analysis["response_to_merchant"])
-        close_session(tg_id)
-    else:
+    # ── Если был режим self_help и пишет "2" — переводим на саппорт ───────
+    if session.get("mode") == "self_help" and message_text.strip() == "2":
+        await update.message.reply_text("⏳ Создаю заявку для саппорта...")
+        full_message = "\n".join(session["messages"])
+        analysis = analyze_with_claude(merchant, full_message)
         stats["escalations"] += 1
         ticket_id = create_support_ticket(merchant, full_message, analysis)
         if ticket_id:
             session["ticket_id"] = ticket_id
             emoji = PRIORITY_EMOJI.get(analysis.get("priority", "Normal"), "🟡")
             await update.message.reply_text(
-                f"✅ *Ваш запрос принят!*\n\n"
+                f"✅ *Заявка создана!*\n\n"
                 f"{emoji} Приоритет: *{analysis.get('priority')}*\n"
                 f"📁 Категория: *{analysis.get('category')}*\n\n"
-                f"Специалист свяжется с вами в течение рабочего дня.\n"
-                f"Номер: `{ticket_id[:8]}`\n\n"
-                f"_Можете дополнить обращение — просто напишите ещё._",
+                f"Специалист свяжется с вами.\n"
+                f"Номер: `{ticket_id[:8]}`",
                 parse_mode="Markdown"
             )
         else:
-            await update.message.reply_text(
-                "✅ Запрос получен. Специалист свяжется с вами."
-            )
+            await update.message.reply_text("✅ Запрос получен. Специалист свяжется с вами.")
+        return
+
+    # ── Первое сообщение мерчанта — спрашиваем выбор ──────────────────────
+    session["awaiting_choice"] = True
+    await update.message.reply_text(
+        f"👋 *{merchant['name']}*, как вам помочь?\n\n"
+        f"1️⃣ *Помочь решить самому* — AI подскажет решение\n"
+        f"2️⃣ *Отправить задачу саппорту* — создадим заявку\n\n"
+        f"Напишите *1* или *2*",
+        parse_mode="Markdown"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
