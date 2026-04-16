@@ -90,9 +90,10 @@ def get_ticket_fields(force: bool = False) -> dict:
             options = {}
             for opt in (f.get("type_config") or {}).get("options", []) or []:
                 opt_name = (opt.get("name") or "").strip().lower()
-                opt_id   = opt.get("id") or opt.get("orderindex")
-                if opt_name and opt_id is not None:
-                    options[opt_name] = opt_id
+                opt_uuid = opt.get("id")
+                opt_order = opt.get("orderindex")
+                if opt_name and (opt_uuid is not None or opt_order is not None):
+                    options[opt_name] = {"uuid": opt_uuid, "orderindex": opt_order}
             result[name.lower()] = {
                 "id":      f.get("id"),
                 "type":    f.get("type"),
@@ -113,7 +114,10 @@ def get_ticket_fields(force: bool = False) -> dict:
 
 
 def build_custom_field(name_candidates: list, value, dropdown: bool = False) -> dict | None:
-    """Ищет поле по списку возможных имён и возвращает payload элемент для custom_fields."""
+    """Ищет поле по списку возможных имён и возвращает payload элемент для custom_fields.
+    Для dropdown возвращает {"id", "value" (uuid), "orderindex", "field_name", "_dropdown": True, "_option_label": ...}.
+    Для текста — {"id", "value"}.
+    """
     fields = get_ticket_fields()
     if not fields:
         return None
@@ -127,24 +131,33 @@ def build_custom_field(name_candidates: list, value, dropdown: bool = False) -> 
         return None
     if dropdown:
         val_key = str(value).strip().lower()
-        uuid = field["options"].get(val_key)
-        if uuid is None:
+        match = field["options"].get(val_key)
+        matched_label = val_key if match else None
+        if match is None:
             # Попробуем частичное совпадение (игнорируем эмодзи/пробелы)
             import re
             norm_val = re.sub(r"[^a-zа-я0-9]", "", val_key)
-            for opt_name, opt_id in field["options"].items():
+            for opt_name, opt_meta in field["options"].items():
                 norm_opt = re.sub(r"[^a-zа-я0-9]", "", opt_name)
                 if norm_val and norm_opt and (norm_val in norm_opt or norm_opt in norm_val):
-                    uuid = opt_id
+                    match = opt_meta
+                    matched_label = opt_name
                     break
-        if uuid is None:
+        if match is None:
             logger.warning(
                 f"Dropdown '{field['name']}' option '{value}' не найден. "
                 f"Доступные: {list(field['options'].keys())}"
             )
             return None
-        return {"id": field["id"], "value": uuid}
-    return {"id": field["id"], "value": str(value)}
+        return {
+            "id": field["id"],
+            "value": match.get("uuid"),
+            "orderindex": match.get("orderindex"),
+            "field_name": field["name"],
+            "_option_label": matched_label,
+            "_dropdown": True,
+        }
+    return {"id": field["id"], "value": str(value), "field_name": field["name"]}
 
 # ─── ClickUp Custom Field IDs (из clickup_ids.json) ─────────────────────
 TICKET_FIELDS = {
@@ -601,16 +614,27 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
         cf = build_custom_field(["Phone", "Телефон"], phone)
         if cf: custom_fields.append(cf)
 
+    # Разделяем: dropdowns ставим ОТДЕЛЬНО через /task/{id}/field/{id}
+    # (bulk POST иногда молча теряет dropdown значения — ClickUp баг)
+    dropdown_fields = [f for f in custom_fields if f.get("_dropdown")]
+    plain_fields = [
+        {"id": f["id"], "value": f["value"]}
+        for f in custom_fields if not f.get("_dropdown")
+    ]
+
     payload = {
         "name":          task_name,
         "description":   description,
         "priority":      priority,
         "assignees":     [assigned_agent["id"]],
-        "custom_fields": custom_fields,
+        "custom_fields": plain_fields,
     }
 
-    logger.info(f"Creating ticket with {len(custom_fields)} custom fields: "
-                f"{[f['id'][:8] for f in custom_fields]}")
+    logger.info(
+        f"Creating ticket: plain_fields={len(plain_fields)}, "
+        f"dropdowns_deferred={len(dropdown_fields)} "
+        f"({[(f.get('field_name'), f.get('_option_label')) for f in dropdown_fields]})"
+    )
 
     r = httpx.post(
         f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
@@ -623,6 +647,47 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
         ticket_id = task["id"]
         logger.info(f"Тикет создан: {ticket_id}")
         stats["tickets_created"] += 1
+
+        # Теперь ставим dropdown поля по одному — этот endpoint возвращает
+        # реальные ошибки вместо тихого пропуска
+        for df in dropdown_fields:
+            field_id   = df["id"]
+            field_name = df.get("field_name", field_id[:8])
+            uuid_val   = df.get("value")
+            order_val  = df.get("orderindex")
+            url = f"{CLICKUP_BASE}/task/{ticket_id}/field/{field_id}"
+
+            # Попытка 1: UUID
+            ok = False
+            if uuid_val:
+                rr = httpx.post(url, headers=CLICKUP_HEADERS, json={"value": uuid_val})
+                if rr.status_code in (200, 201):
+                    logger.info(f"  ✓ {field_name} = {df.get('_option_label')} (uuid)")
+                    ok = True
+                else:
+                    logger.warning(
+                        f"  ✗ {field_name} uuid failed: {rr.status_code} {rr.text[:200]}"
+                    )
+
+            # Попытка 2: orderindex (integer)
+            if not ok and order_val is not None:
+                try:
+                    order_int = int(order_val)
+                except (TypeError, ValueError):
+                    order_int = order_val
+                rr = httpx.post(url, headers=CLICKUP_HEADERS, json={"value": order_int})
+                if rr.status_code in (200, 201):
+                    logger.info(f"  ✓ {field_name} = {df.get('_option_label')} (orderindex={order_int})")
+                    ok = True
+                else:
+                    logger.error(
+                        f"  ✗ {field_name} orderindex failed: {rr.status_code} {rr.text[:200]}"
+                    )
+
+            if not ok:
+                logger.error(
+                    f"  ✗✗ {field_name}: ВСЕ попытки провалились (uuid={uuid_val}, order={order_val})"
+                )
 
         # Store ticket -> tg_id for reliable notification routing (replaces description parsing)
         tg_id_val = merchant.get("telegram_id")
