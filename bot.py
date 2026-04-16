@@ -540,14 +540,22 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
     priority_label = ai_analysis.get("priority", "Normal")
     emoji          = PRIORITY_EMOJI.get(priority_label, "🟡")
 
-    # Используем AI-резюме для названия тикета
-    summary    = ai_analysis.get("escalation_summary", "")
-    task_title = summary[:80] if summary else message[:80]
-    task_name  = f"{emoji} [{category}] {merchant['name']} — {task_title}"
+    # Используем AI-сгенерированное ЧИСТОЕ название (без опечаток/сленга)
+    ticket_title = (ai_analysis.get("ticket_title")
+                    or ai_analysis.get("escalation_summary")
+                    or message)
+    ticket_title = ticket_title.strip().replace("\n", " ")[:80]
+    task_name = f"{emoji} [{category}] {merchant['name']} — {ticket_title}"
 
-    # Описание — ТОЛЬКО проблема мерчанта. Всё остальное (приоритет, категория,
-    # телефон, назначенный агент) живёт в custom fields и выглядит чище в UI.
-    description = message.strip() or ai_analysis.get('escalation_summary', '')
+    # Описание — ПРОФЕССИОНАЛЬНОЕ описание от AI (что нужно саппорту сделать)
+    # + оригинальный текст мерчанта для контекста.
+    ai_desc = (ai_analysis.get("ticket_description")
+               or ai_analysis.get("escalation_summary") or "").strip()
+    original_msg = message.strip()
+    if ai_desc and ai_desc != original_msg:
+        description = f"{ai_desc}\n\n---\n📩 Оригинал от мерчанта:\n{original_msg}"
+    else:
+        description = original_msg or ai_desc
 
     # Custom fields — динамически находим ВСЕ подходящие поля в ClickUp
     merchant_name_variants = [merchant.get('name', '')]
@@ -674,9 +682,10 @@ async def _create_and_confirm_ticket(update: Update, session: dict, merchant: di
 
     await update.message.reply_text("⏳ Анализирую переписку и создаю заявку...")
 
-    # ВСЕГДА делаем свежий анализ всей переписки, чтобы тикет получил
-    # корректное название/категорию/приоритет на основе полного контекста
-    analysis = analyze_with_claude(merchant, full_message)
+    # ВСЕГДА используем Sonnet для тикета — он лучше чистит опечатки,
+    # пишет профессиональное название и описание для команды саппорта.
+    # +несколько центов на тикет, но гораздо чище результат в ClickUp.
+    analysis = analyze_with_claude(merchant, full_message, use_sonnet=True)
 
     # Если по анализу эскалация не нужна — всё равно создаём тикет
     # (мерчант явно попросил саппорта)
@@ -719,8 +728,8 @@ SYSTEM_PROMPT_TEMPLATE = """Ты AI-ассистент поддержки Infini
 
 ПРАВИЛА:
 - Определи язык мерчанта и отвечай ТОЛЬКО на нём (RU/EN/TJ/UZ/AR/ES).
-- Понимай уличный/разговорный стиль, сленг, смешанный язык.
-- Будь кратким, дружелюбным, по делу. Не растягивай ответ.
+- Понимай уличный/разговорный стиль, сленг, опечатки, смешанный язык, кашу из мыслей.
+- Будь кратким, дружелюбным, по делу.
 - ОТВЕЧАЙ СРАЗУ если уверенность >85%. Давай конкретные шаги решения.
 - ЭСКАЛИРУЙ (should_escalate=true) если: чарджбеки, закрытие аккаунта, ставки/rates, возвраты >$500, фрод/PCI, смена банковских реквизитов.
 - НИКОГДА не делись данными других мерчантов.
@@ -730,8 +739,19 @@ SYSTEM_PROMPT_TEMPLATE = """Ты AI-ассистент поддержки Infini
 
 Категории ТОЛЬКО из списка: Terminal, Payment, Chargeback, Statement, Billing, Account, Software, Hardware, Fraud, Compliance, General
 
-JSON ответ:
-{{"confidence":0-100,"should_escalate":true/false,"category":"<из списка>","priority":"Urgent|High|Normal|Low","response_to_merchant":"текст ответа мерчанту","escalation_summary":"краткое резюме для команды","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
+ТИКЕТ ДЛЯ КОМАНДЫ (если should_escalate=true):
+- "ticket_title" — ЧИСТОЕ, профессиональное название тикета на русском, БЕЗ опечаток, БЕЗ слов "помогите/саппорт/неа/нет", СУТЬ проблемы одной строкой (макс 70 символов).
+  Плохо: "меню поменять и ценцы увидеть неа"
+  Хорошо: "Изменение меню и просмотр цен в Clover POS"
+- "ticket_description" — ПОДРОБНОЕ описание проблемы для команды саппорта (3-5 предложений):
+  1. Что именно нужно мерчанту
+  2. Какой контекст (какой бизнес, что уже пробовали)
+  3. Что AI предложил и почему не подошло (если был диалог)
+  4. Конкретные действия которые должен сделать саппорт
+  Пиши как senior support engineer коллегам — по делу, технически, без воды.
+
+JSON ответ (строго этот формат):
+{{"confidence":0-100,"should_escalate":true/false,"category":"<из списка>","priority":"Urgent|High|Normal|Low","response_to_merchant":"ответ мерчанту","ticket_title":"чистое название","ticket_description":"подробное описание","escalation_summary":"краткое резюме 1 строкой","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
 
 
 
