@@ -71,6 +71,42 @@ TICKET_FIELDS = {
     "phone":          "67b7f5f3-2ebb-4b64-9d3f-f87c0a09b4bb",
 }
 
+# ─── Dropdown option UUIDs для ClickUp ───────────────────────────────────
+CHANNEL_OPTIONS = {
+    "Telegram":  "3aff0664-7a5a-4d05-965b-619f0b73f195",
+    "WhatsApp":  "66413fde-ef0c-4ca2-a2b1-1acd51827cbb",
+    "Phone":     "d825e952-dfc4-4bc9-b820-f271c67c9553",
+    "Email":     "0c4530dc-7fd0-4708-b2a9-9ae077e4584a",
+    "Internal":  "78b88569-2682-4268-92fa-75f8f7555811",
+}
+# Маппинг AI-категорий → ClickUp option UUIDs
+CATEGORY_OPTIONS = {
+    "Hardware":    "056486a2-7b72-4128-951d-dac6ea73acf0",
+    "Terminal":    "056486a2-7b72-4128-951d-dac6ea73acf0",  # → Hardware
+    "Software":    "2f026484-3968-46e6-978b-7cd1f104a4dd",
+    "Statement":   "d9d74adf-84ee-4ac6-a801-7a1252b0bf9a",
+    "Payment":     "d2dbf95f-012b-4be7-b990-b3590a984b6d",
+    "Account":     "dd3b3139-6def-4003-8222-81611780fa6d",
+    "Billing":     "dd3b3139-6def-4003-8222-81611780fa6d",  # → Account
+    "Chargeback":  "dd3b3139-6def-4003-8222-81611780fa6d",  # → Account
+    "Fraud":       "dd3b3139-6def-4003-8222-81611780fa6d",  # → Account
+    "Compliance":  "dd3b3139-6def-4003-8222-81611780fa6d",  # → Account
+    "General":     "a00d022d-9004-4158-bec4-e8fd416fba25",  # → Other
+    "Other":       "a00d022d-9004-4158-bec4-e8fd416fba25",
+}
+PRIORITY_OPTIONS = {
+    "Urgent": "9bcf9882-3a61-44b6-ac3c-fd2955629fe7",
+    "High":   "0beb79b6-4b84-459a-9cc2-34785c4de7ac",
+    "Normal": "22316d4f-a89d-4a0d-990b-e36381295228",
+    "Low":    "17d14a60-9a6c-4ec3-bb2a-e27b6016235f",
+}
+SOURCE_OPTIONS = {
+    "Merchant Request": "4a39b4c9-a214-4eff-8226-65209281280a",
+    "Internal Task":    "06558cbf-04ce-486c-b32e-2f95de77136b",
+}
+# ID поля "Мерчант" (short_text) — отдельно от "Merchant" (text)
+MERCHANT_SHORT_TEXT_FIELD_ID = "459abe18-91a9-4968-bd84-6c95257ebdd4"
+
 # ─── Саппорт-команда ─────────────────────────────────────────────────────
 SUPPORT_AGENTS = [
     {"id": 94469635, "name": "Support 1"},
@@ -130,6 +166,9 @@ spam_tracker = {}  # {tg_id: {"count": int, "first_msg": timestamp}}
 ticket_to_tg = {}  # {clickup_ticket_id: tg_id (int)}
 SPAM_LIMIT  = 10   # макс 10 сообщений за 60 сек
 SPAM_WINDOW = 60
+
+# addmerchant dialog state (agent/ISO only)
+addmerchant_state = {}  # {tg_id: {"step": "name"|"mid"|"phone", "name": str, ...}}
 
 # Persistence
 STATE_FILE = Path("data/state.json")
@@ -431,15 +470,25 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
 👤 Назначено: {assigned_agent['name']}{phone_line}
 """
 
-    # Custom fields — каждое поле отдельно в ClickUp
+    # Custom fields — dropdown поля нужно отправлять как option UUID
+    cat_uuid = CATEGORY_OPTIONS.get(category, CATEGORY_OPTIONS.get("Other", ""))
+    pri_uuid = PRIORITY_OPTIONS.get(priority_label, PRIORITY_OPTIONS.get("Normal", ""))
+    src_uuid = SOURCE_OPTIONS.get("Merchant Request", "")
+    chn_uuid = CHANNEL_OPTIONS.get("Telegram", "")
+
     custom_fields = [
-        {"id": TICKET_FIELDS["merchant"],       "value": merchant['name']},
-        {"id": TICKET_FIELDS["mid"],            "value": merchant.get('mid', '')},
-        {"id": TICKET_FIELDS["category"],       "value": category},
-        {"id": TICKET_FIELDS["priority_level"], "value": priority_label},
-        {"id": TICKET_FIELDS["source"],         "value": "Telegram Bot"},
-        {"id": TICKET_FIELDS["channel"],        "value": "Telegram"},
+        {"id": TICKET_FIELDS["merchant"],        "value": merchant['name']},
+        {"id": MERCHANT_SHORT_TEXT_FIELD_ID,     "value": merchant['name']},   # "Мерчант" short_text
+        {"id": TICKET_FIELDS["mid"],             "value": merchant.get('mid', '')},
     ]
+    if cat_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["category"],       "value": cat_uuid})
+    if pri_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["priority_level"], "value": pri_uuid})
+    if src_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["source"],         "value": src_uuid})
+    if chn_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["channel"],        "value": chn_uuid})
     if phone:
         custom_fields.append({"id": TICKET_FIELDS["phone"], "value": phone})
 
@@ -512,6 +561,42 @@ def add_comment_to_ticket(ticket_id: str, comment: str):
         json={"comment_text": comment}
     )
     return r.status_code in (200, 201)
+
+
+async def _create_and_confirm_ticket(update: Update, session: dict, merchant: dict, phone: str = None):
+    """Создаёт тикет в ClickUp и уведомляет мерчанта."""
+    analysis = session.get("pending_analysis") or session.get("last_analysis") or {}
+    full_message = "\n".join(session.get("messages", []))
+
+    # Если анализа нет — делаем быстрый
+    if not analysis:
+        analysis = analyze_with_claude(merchant, full_message)
+
+    await update.message.reply_text("⏳ Создаю заявку...")
+
+    ticket_id = create_support_ticket(merchant, full_message, analysis, phone)
+
+    if ticket_id:
+        session["ticket_id"] = ticket_id
+        session["pending_analysis"] = None
+        priority = analysis.get("priority", "Normal")
+        category = analysis.get("category", "General")
+        emoji = PRIORITY_EMOJI.get(priority, "🟡")
+
+        await update.message.reply_text(
+            f"✅ *Заявка принята!*\n\n"
+            f"{emoji} Приоритет: *{priority}*\n"
+            f"📁 Категория: *{category}*\n"
+            f"🔖 Номер: `{ticket_id[:8]}`\n\n"
+            f"Специалист свяжется с вами в ближайшее время.\n"
+            f"Если нужно добавить информацию — просто напишите.",
+            parse_mode="Markdown"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Не удалось создать заявку.\n"
+            "Напишите напрямую: 📧 Support@infinitypay.us"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -940,7 +1025,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Ожидаем телефон мерчанта ───────────────────────────────────────
+    # ── Ожидаем телефон для создания тикета ────────────────────────────
     if session.get("awaiting_phone"):
         session["awaiting_phone"] = False
         phone = message_text.strip()
@@ -948,104 +1033,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             phone = None
         else:
             session["phone_number"] = phone
-
-        await update.message.reply_text("⏳ Создаю заявку для саппорта...")
-        full_message = "\n".join(session["messages"])
-        analysis = analyze_with_claude(merchant, full_message)
-        stats["escalations"] += 1
-        ticket_id = create_support_ticket(merchant, full_message, analysis, phone=phone)
-        if ticket_id:
-            session["ticket_id"] = ticket_id
-            emoji = PRIORITY_EMOJI.get(analysis.get("priority", "Normal"), "🟡")
-            await update.message.reply_text(
-                f"✅ *Заявка создана!*\n\n"
-                f"{emoji} Приоритет: *{analysis.get('priority')}*\n"
-                f"📁 Категория: *{analysis.get('category')}*\n\n"
-                f"Специалист свяжется с вами.\n"
-                f"🆔 Номер: `{ticket_id[:8]}`\n\n"
-                f"_Можете дополнить — просто напишите ещё._",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text("✅ Запрос получен. Специалист свяжется с вами.")
+        await _create_and_confirm_ticket(update, session, merchant, phone)
         return
 
-    # ── Ожидаем выбор: самому решить или саппорт ────────────────────────
-    if session.get("awaiting_choice"):
-        choice = message_text.lower().strip()
-
-        if choice in ("1", "сам", "самому", "помочь", "решить"):
-            session["awaiting_choice"] = False
-            session["mode"] = "self_help"
-            await update.message.reply_text("⏳ Анализирую ваш вопрос...")
-            full_message = "\n".join(session["messages"])
-            analysis = analyze_with_claude(merchant, full_message)
-            stats["ai_direct_answers"] += 1
-            await update.message.reply_text(analysis["response_to_merchant"])
-            await update.message.reply_text(
-                "💡 Помогло? Если нет — напишите *2* для заявки в саппорт.",
-                parse_mode="Markdown"
-            )
-            return
-
-        elif choice in ("2", "саппорт", "поддержка", "задача", "агент"):
-            session["awaiting_choice"] = False
-            session["mode"] = "support"
-            session["awaiting_phone"] = True
-            await update.message.reply_text(
-                "📞 Телефон для обратной связи?\n\n"
-                "_Напишите номер или_ *пропустить*",
-                parse_mode="Markdown"
-            )
-            return
-
-        else:
-            # Не понял выбор — переспрашиваем
-            await update.message.reply_text(
-                "Напишите *1* или *2*:\n\n"
-                "1️⃣ — Быстрая помощь (AI)\n"
-                "2️⃣ — Заявка в саппорт",
-                parse_mode="Markdown"
-            )
-            return
-
-    # ── Если режим self_help ─────────────────────────────────────────────
+    # ── Если AI уже ответил — проверяем, хочет ли мерчант саппорт ──────
     if session.get("mode") == "self_help":
-        # "2" — переводим на саппорт (сначала спрашиваем телефон)
-        if message_text.strip() == "2":
+        escalation_triggers = ("саппорт", "support", "заявка", "2", "не помогло",
+                               "не работает", "всё равно", "все равно", "не понял",
+                               "не понятно", "создай заявку", "нужен человек")
+        msg_lower = message_text.lower().strip()
+        if msg_lower in escalation_triggers or any(t in msg_lower for t in escalation_triggers):
             session["mode"] = "support"
             session["awaiting_phone"] = True
             await update.message.reply_text(
-                "📞 Телефон для обратной связи?\n\n"
-                "_Напишите номер или_ *пропустить*",
+                "📞 Хорошо, создам заявку для специалиста!\n\n"
+                "Укажите телефон для связи или напишите *пропустить*:",
                 parse_mode="Markdown"
             )
             return
+        # Новый вопрос — сбрасываем режим, анализируем заново
+        session["mode"] = None
+        session["messages"] = []
+        session["last_analysis"] = None
 
-        # Любое другое сообщение — продолжаем AI-диалог
-        session["messages"].append(message_text)
-        await update.message.reply_text("⏳ Анализирую...")
-        full_message = "\n".join(session["messages"])
-        analysis = analyze_with_claude(merchant, full_message)
-        stats["ai_direct_answers"] += 1
-        await update.message.reply_text(analysis["response_to_merchant"])
-        await update.message.reply_text(
-            "💡 Помогло? Если нет — напишите *2* для заявки в саппорт.",
-            parse_mode="Markdown"
-        )
-        return
-
-    # ── Первое сообщение мерчанта — запоминаем и спрашиваем выбор ────────
+    # ── Мерчант пишет сообщение — AI сразу анализирует ──────────────────
     session["messages"].append(message_text)
+    full_message = "\n".join(session["messages"])
 
-    # Clover intent check (if merchant has credentials, handle live data queries)
+    # Clover intent check
     if merchant.get("clover_merchant_id") and merchant.get("clover_access_token"):
         msg_lower = message_text.lower()
-        sales_kw = ["sales", "revenue", "today", "orders today",
-                    "продажи", "выручка", "заказы сегодня", "продажи сегодня"]
-        order_kw = ["last order", "latest order", "последний заказ", "последняя заказ"]
-        toggle_kw = ["disable", "enable", "turn off", "turn on", "hide",
-                     "выключи", "включи", "убрать из меню", "добавить в меню"]
+        sales_kw = ["sales", "revenue", "today", "продажи", "выручка", "заказы сегодня"]
+        order_kw = ["last order", "latest order", "последний заказ"]
+        toggle_kw = ["disable", "enable", "turn off", "turn on", "выключи", "включи", "убрать из меню", "добавить в меню"]
         clover_resp = None
         if any(kw in msg_lower for kw in sales_kw):
             clover_resp = get_clover_sales_today(merchant)
@@ -1058,12 +1078,113 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(clover_resp)
             return
 
-    session["awaiting_choice"] = True
+    # AI анализирует сразу
+    await update.message.reply_text("⏳ Анализирую...")
+    analysis = analyze_with_claude(merchant, full_message)
+    confidence = analysis.get("confidence", 0)
+    should_escalate = analysis.get("should_escalate", False)
+
+    if confidence >= 85 and not should_escalate:
+        # AI уверен — отвечает сам
+        stats["ai_direct_answers"] += 1
+        session["mode"] = "self_help"
+        session["last_analysis"] = analysis
+        await update.message.reply_text(analysis["response_to_merchant"])
+        await update.message.reply_text(
+            "💡 Помогло? Если нет — напишите *саппорт* и создадим заявку.",
+            parse_mode="Markdown"
+        )
+    else:
+        # Нужен саппорт — спрашиваем телефон и создаём тикет
+        stats["escalations"] += 1
+        session["mode"] = "support"
+        session["awaiting_phone"] = True
+        session["pending_analysis"] = analysis
+        await update.message.reply_text(
+            "📞 Понял! Создаю заявку для команды.\n\n"
+            "Укажите телефон для связи или напишите *пропустить*:",
+            parse_mode="Markdown"
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ADDMERCHANT — создание новых мерчантов
+# ═══════════════════════════════════════════════════════════════════════════
+
+def generate_unique_merchant_code() -> str:
+    """Генерирует следующий свободный код INF-XXX."""
+    page = 0
+    max_num = 0
+    while True:
+        r = httpx.get(
+            f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
+            headers=CLICKUP_HEADERS,
+            params={"include_closed": False, "page": page, "subtasks": False}
+        )
+        if r.status_code != 200:
+            break
+        tasks = r.json().get("tasks", [])
+        if not tasks:
+            break
+        for task in tasks:
+            for field in task.get("custom_fields", []):
+                if field.get("name") == "Unique Code":
+                    val = field.get("value", "")
+                    if val and val.upper().startswith("INF-"):
+                        try:
+                            num = int(val.split("-")[1])
+                            max_num = max(max_num, num)
+                        except Exception:
+                            pass
+        if len(tasks) < 100:
+            break
+        page += 1
+    return f"INF-{max_num + 1:03d}"
+
+
+def create_merchant_in_clickup(name: str, mid: str, phone: str, code: str) -> str | None:
+    """Создаёт карточку мерчанта в ClickUp."""
+    MERCHANT_FIELD_IDS = {
+        "MID":         "6b12ba3e-96a6-4068-9eaa-1cba547558ce",
+        "Phone":       "67b7f5f3-2ebb-4b64-9d3f-f87c0a09b4bb",
+        "Unique Code": "be7d8b56-8466-4328-aee8-08ea04cb8295",
+        "Telegram ID": "48e0b107-75f9-41b4-beb6-cecc0e9d9b0d",
+        "Contact Name":"a1e9331d-feaa-4e33-97d6-9de70848de6a",
+    }
+    task_name = f"{name} | MID: {mid}" if mid else name
+    custom_fields = [
+        {"id": MERCHANT_FIELD_IDS["Unique Code"], "value": code},
+    ]
+    if mid:
+        custom_fields.append({"id": MERCHANT_FIELD_IDS["MID"],   "value": mid})
+    if phone:
+        custom_fields.append({"id": MERCHANT_FIELD_IDS["Phone"], "value": phone})
+
+    payload = {"name": task_name, "custom_fields": custom_fields}
+    r = httpx.post(
+        f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
+        headers=CLICKUP_HEADERS,
+        json=payload
+    )
+    if r.status_code in (200, 201):
+        return r.json()["id"]
+    logger.error(f"Ошибка создания мерчанта: {r.status_code} {r.text}")
+    return None
+
+
+async def addmerchant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /addmerchant — добавить нового мерчанта (только ISO/агент)."""
+    tg_id = update.effective_user.id
+    if tg_id not in agent_sessions:
+        await update.message.reply_text(
+            "🔒 Только для агентов/ISO.\nВойдите через /login CODE"
+        )
+        return
+    addmerchant_state[tg_id] = {"step": "name"}
     await update.message.reply_text(
-        f"👋 *{merchant['name']}*, выберите:\n\n"
-        f"1️⃣ *Быстрая помощь* — AI ответит сейчас\n"
-        f"2️⃣ *Заявка в саппорт* — специалист свяжется\n\n"
-        f"Напишите *1* или *2*",
+        "➕ *Добавление нового мерчанта*\n\n"
+        "Шаг 1/3 — Введите *название бизнеса*:\n"
+        "_(например: Pizza Palace или Ресторан Самарканд)_",
         parse_mode="Markdown"
     )
 
@@ -1124,14 +1245,23 @@ async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None):
 
     assigned_agent = get_least_loaded_agent()
 
-    # ── Custom fields — структурированные данные ──
+    # ── Custom fields — dropdown поля как option UUID ──
+    cat_uuid = CATEGORY_OPTIONS.get(category, CATEGORY_OPTIONS.get("Other", ""))
+    pri_uuid = PRIORITY_OPTIONS.get(priority_label, PRIORITY_OPTIONS.get("Normal", ""))
+    src_uuid = SOURCE_OPTIONS.get("Internal Task", "")
+    chn_uuid = CHANNEL_OPTIONS.get("Telegram", "")
+
     custom_fields = [
         {"id": TICKET_FIELDS["merchant"],       "value": merchant},
-        {"id": TICKET_FIELDS["category"],       "value": category},
-        {"id": TICKET_FIELDS["priority_level"], "value": priority_label},
-        {"id": TICKET_FIELDS["source"],         "value": f"Agent: {agent['name']}"},
-        {"id": TICKET_FIELDS["channel"],        "value": "Telegram"},
     ]
+    if cat_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["category"],       "value": cat_uuid})
+    if pri_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["priority_level"], "value": pri_uuid})
+    if src_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["source"],         "value": src_uuid})
+    if chn_uuid:
+        custom_fields.append({"id": TICKET_FIELDS["channel"],        "value": chn_uuid})
     if phone:
         custom_fields.append({"id": TICKET_FIELDS["phone"], "value": phone})
 
@@ -1172,6 +1302,66 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
     """AI-powered: понимает текст, спрашивает телефон, создаёт задачу."""
     tg_id = update.effective_user.id
     agent = agent_sessions[tg_id]
+
+    # ── /addmerchant dialog ──────────────────────────────────────────────
+    if tg_id in addmerchant_state:
+        state = addmerchant_state[tg_id]
+        step  = state.get("step")
+
+        if step == "name":
+            state["name"] = text.strip()
+            state["step"] = "mid"
+            await update.message.reply_text(
+                f"✅ Название: *{state['name']}*\n\n"
+                f"Шаг 2/3 — Введите *MID* (Merchant ID):\n"
+                f"_(только цифры, например: 12345678)_\n\n"
+                f"Или напишите *пропустить* если MID ещё не назначен",
+                parse_mode="Markdown"
+            )
+            return
+
+        elif step == "mid":
+            val = text.strip()
+            state["mid"] = "" if val.lower() in ("пропустить", "skip", "-", "нет") else val
+            state["step"] = "phone"
+            await update.message.reply_text(
+                f"✅ MID: *{state['mid'] or 'не указан'}*\n\n"
+                f"Шаг 3/3 — Введите *телефон* мерчанта:\n"
+                f"_(например: +13471234567)_\n\n"
+                f"Или напишите *пропустить*",
+                parse_mode="Markdown"
+            )
+            return
+
+        elif step == "phone":
+            val = text.strip()
+            state["phone"] = "" if val.lower() in ("пропустить", "skip", "-", "нет") else val
+
+            name  = state["name"]
+            mid   = state.get("mid", "")
+            phone = state.get("phone", "")
+
+            await update.message.reply_text("⏳ Создаю мерчанта в системе...")
+            code    = generate_unique_merchant_code()
+            task_id = create_merchant_in_clickup(name, mid, phone, code)
+
+            del addmerchant_state[tg_id]
+
+            if task_id:
+                await update.message.reply_text(
+                    f"✅ *Мерчант добавлен!*\n\n"
+                    f"🏪 *{name}*\n"
+                    f"🆔 MID: `{mid or 'не указан'}`\n"
+                    f"📞 Телефон: {phone or 'не указан'}\n\n"
+                    f"🔑 *Персональный код для бота:*\n`{code}`\n\n"
+                    f"Отправьте этот код мерчанту — он вводит его в боте при первом входе.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    "❌ Ошибка создания мерчанта в ClickUp. Попробуйте ещё раз /addmerchant"
+                )
+            return
 
     # ── Шаг 2: ожидаем телефон ───────────────────────────────────────────
     if tg_id in pending_agent_tasks:
@@ -1442,6 +1632,7 @@ def main():
     app.add_handler(CommandHandler("logout", logout_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("close_session", close_session_command))
+    app.add_handler(CommandHandler("addmerchant", addmerchant_command))
 
     # Голосовые
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
