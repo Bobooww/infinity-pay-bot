@@ -23,7 +23,7 @@ import tempfile
 from datetime import datetime
 from dotenv import load_dotenv
 from anthropic import Anthropic
-import requests
+import httpx
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -76,9 +76,11 @@ SUPPORT_AGENTS = [
 ]
 
 # âââ Ð¡ÐµÐºÑÐµÑÐ½ÑÐµ ÐºÐ¾Ð´Ñ Ð´Ð»Ñ Ð»Ð¾Ð³Ð¸Ð½Ð° Ð°Ð³ÐµÐ½ÑÐ¾Ð²/ISO ââââââââââââââââââââââââââââââââ
+_agent_code = os.environ.get("AGENT_CODE_AGENT", "IAMAGENT")
+_iso_code   = os.environ.get("AGENT_CODE_ISO", "ISO-MASTER")
 AGENT_CODES = {
-    "IAMAGENT": {"role": "agent", "name": "Infinity Pay Staff", "clickup_id": None},
-    "ISO-MASTER": {"role": "iso", "name": "Shams (ISO Owner)", "clickup_id": None},
+    _agent_code: {"role": "agent", "name": "Infinity Pay Staff", "clickup_id": None},
+    _iso_code:   {"role": "iso",   "name": "Shams (ISO Owner)",  "clickup_id": None},
 }
 
 # âââ AI ÐºÐ»Ð¸ÐµÐ½ÑÑ ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
@@ -233,7 +235,7 @@ def get_least_loaded_agent() -> dict:
     agent_loads = []
     for agent in SUPPORT_AGENTS:
         try:
-            r = requests.get(
+            r = httpx.get(
                 f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
                 headers=CLICKUP_HEADERS,
                 params={
@@ -261,7 +263,7 @@ def search_merchant_by_code(code: str) -> dict | None:
     """ÐÑÐµÑ Ð¼ÐµÑÑÐ°Ð½ÑÐ° Ð¿Ð¾ ÑÐ½Ð¸ÐºÐ°Ð»ÑÐ½Ð¾Ð¼Ñ ÐºÐ¾Ð´Ñ."""
     page = 0
     while True:
-        r = requests.get(
+        r = httpx.get(
             f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
             headers=CLICKUP_HEADERS,
             params={"include_closed": False, "page": page, "subtasks": False}
@@ -287,7 +289,7 @@ def search_merchant_by_telegram_id(telegram_id: int) -> dict | None:
     """ÐÑÐµÑ Ð¼ÐµÑÑÐ°Ð½ÑÐ° Ð¿Ð¾ Telegram ID."""
     page = 0
     while True:
-        r = requests.get(
+        r = httpx.get(
             f"{CLICKUP_BASE}/list/{CLICKUP_LIST_MERCHANTS}/task",
             headers=CLICKUP_HEADERS,
             params={"include_closed": False, "page": page, "subtasks": False}
@@ -340,7 +342,7 @@ def extract_merchant_data(task: dict) -> dict:
 
 def save_telegram_id_to_merchant(task_id: str, telegram_id: int):
     """Ð¡Ð¾ÑÑÐ°Ð½ÑÐµÑ Telegram ID Ð² ÐºÐ°ÑÑÐ¾ÑÐºÑ Ð¼ÐµÑÑÐ°Ð½ÑÐ°."""
-    r = requests.get(f"{CLICKUP_BASE}/task/{task_id}", headers=CLICKUP_HEADERS)
+    r = httpx.get(f"{CLICKUP_BASE}/task/{task_id}", headers=CLICKUP_HEADERS)
     if r.status_code != 200:
         return False
     task = r.json()
@@ -351,7 +353,7 @@ def save_telegram_id_to_merchant(task_id: str, telegram_id: int):
             break
     if not tg_field_id:
         return False
-    r = requests.post(
+    r = httpx.post(
         f"{CLICKUP_BASE}/task/{task_id}/field/{tg_field_id}",
         headers=CLICKUP_HEADERS,
         json={"value": str(telegram_id)}
@@ -403,7 +405,7 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
         "custom_fields": custom_fields,
     }
 
-    r = requests.post(
+    r = httpx.post(
         f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
         headers=CLICKUP_HEADERS,
         json=payload
@@ -430,7 +432,7 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
                     f"ð *AI Ð ÐµÐ·ÑÐ¼Ðµ:*\n{ai_analysis.get('escalation_summary', 'N/A')}\n\n"
                     f"ð Ð¢Ð¸ÐºÐµÑ ID: `{ticket_id}`"
                 )
-                requests.post(
+                httpx.post(
                     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                     json={
                         "chat_id":    SUPPORT_GROUP_CHAT_ID,
@@ -449,7 +451,7 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict, phone
 
 def add_comment_to_ticket(ticket_id: str, comment: str):
     """ÐÐ¾Ð±Ð°Ð²Ð»ÑÐµÑ ÐºÐ¾Ð¼Ð¼ÐµÐ½ÑÐ°ÑÐ¸Ð¹ Ðº ÑÐ¸ÐºÐµÑÑ Ð² ClickUp."""
-    r = requests.post(
+    r = httpx.post(
         f"{CLICKUP_BASE}/task/{ticket_id}/comment",
         headers=CLICKUP_HEADERS,
         json={"comment_text": comment}
@@ -497,7 +499,7 @@ def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) 
             model=model,
             max_tokens=512,
             system=system_prompt,
-            messages=[{"role": "user", "content": messagsage}]
+            messages=[{"role": "user", "content": message}]
         )
         text = response.content[0].text.strip()
 
@@ -550,7 +552,7 @@ async def transcribe_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         # Whisper API
         with open(tmp_path, "rb") as audio_file:
-            r = requests.post(
+            r = httpx.post(
                 "https://api.openai.com/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
                 files={"file": audio_file},
@@ -968,7 +970,7 @@ async def _create_clickup_task(agent: dict, task_data: dict, phone: str = None):
         "custom_fields": custom_fields,
     }
 
-    r = requests.post(
+    r = httpx.post(
         f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
         headers=CLICKUP_HEADERS,
         json=payload
@@ -1132,7 +1134,7 @@ async def check_ticket_updates(context: ContextTypes.DEFAULT_TYPE):
             del pending_agent_tasks[k]
 
         # ÐÐ¾Ð»ÑÑÐ°ÐµÐ¼ Ð½ÐµÐ´Ð°Ð²Ð½Ð¾ Ð¾Ð±Ð½Ð¾Ð²Ð»ÑÐ½Ð½ÑÐµ ÑÐ¸ÐºÐµÑÑ
-        r = requests.get(
+        r = httpx.get(
             f"{CLICKUP_BASE}/list/{CLICKUP_LIST_TICKETS}/task",
             headers=CLICKUP_HEADERS,
             params={
@@ -1198,7 +1200,7 @@ async def check_ticket_updates(context: ContextTypes.DEFAULT_TYPE):
 
                     # Ð£Ð²ÐµÐ´Ð¾Ð¼Ð»ÑÐµÐ¼ Ð² Ð³ÑÑÐ¿Ð¿Ñ
                     if SUPPORT_GROUP_CHAT_ID:
-                        requests.post(
+                        httpx.post(
                             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                             json={
                                 "chat_id":    SUPPORT_GROUP_CHAT_ID,
@@ -1216,7 +1218,7 @@ async def check_ticket_updates(context: ContextTypes.DEFAULT_TYPE):
 
             # ÐÑÐ¾Ð²ÐµÑÑÐµÐ¼ ÐºÐ¾Ð¼Ð¼ÐµÐ½ÑÐ°ÑÐ¸Ð¸ Ð¾Ñ ÐºÐ¾Ð¼Ð°Ð½Ð´Ñ Ð´Ð»Ñ Ð¿ÐµÑÐµÑÑÐ»ÐºÐ¸ Ð¼ÐµÑÑÐ°Ð½ÑÑ
             try:
-                cr = requests.get(
+                cr = httpx.get(
                     f"{CLICKUP_BASE}/task/{task_id}/comment",
                     headers=CLICKUP_HEADERS
                 )
