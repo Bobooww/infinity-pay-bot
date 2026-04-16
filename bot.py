@@ -491,10 +491,34 @@ def search_merchant_by_telegram_id(telegram_id: int) -> dict | None:
     return None
 
 
+_RU_TO_EN = {
+    'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'e','ж':'zh','з':'z',
+    'и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
+    'с':'s','т':'t','у':'u','ф':'f','х':'kh','ц':'ts','ч':'ch','ш':'sh','щ':'sch',
+    'ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',
+}
+# Обратная (одно-к-одному, неоднозначные берём самые частые)
+_EN_TO_RU = {
+    'a':'а','b':'б','c':'к','d':'д','e':'е','f':'ф','g':'г','h':'х','i':'и',
+    'j':'дж','k':'к','l':'л','m':'м','n':'н','o':'о','p':'п','q':'к','r':'р',
+    's':'с','t':'т','u':'у','v':'в','w':'в','x':'кс','y':'й','z':'з',
+}
+
+def _translit_ru_to_en(s: str) -> str:
+    return "".join(_RU_TO_EN.get(ch, ch) for ch in s.lower())
+
+def _translit_en_to_ru(s: str) -> str:
+    # Обрабатываем частые диграфы СНАЧАЛА
+    s = s.lower()
+    for di, ru in [("zh","ж"),("kh","х"),("ts","ц"),("ch","ч"),("sh","ш"),("yu","ю"),("ya","я"),("sch","щ"),("yo","ё")]:
+        s = s.replace(di, ru)
+    return "".join(_EN_TO_RU.get(ch, ch) for ch in s)
+
+
 def search_merchants_by_name(query: str, limit: int = 5) -> list:
     """Fuzzy поиск мерчантов по имени.
     Возвращает список совпадений (до `limit`), отсортированных по релевантности.
-    Использует нормализацию: lowercase + убираем не-алфавит/цифры.
+    Пробует ОРИГИНАЛ + транслитерацию (рус↔лат) чтобы понять 'Тандури' = 'Tandoori'.
     """
     import re
     if not query or not query.strip():
@@ -504,11 +528,57 @@ def search_merchants_by_name(query: str, limit: int = 5) -> list:
     if not q_norm:
         return []
 
+    # Варианты запроса: оригинал + транслитерации (рус→лат и лат→рус)
+    q_variants_raw = {q_raw, _translit_ru_to_en(q_raw), _translit_en_to_ru(q_raw)}
+    q_variants_norm = {re.sub(r"[^a-zа-я0-9]+", "", v) for v in q_variants_raw}
+    q_variants_norm = {v for v in q_variants_norm if v}
+
+    # Токены (слова ≥3 символов) из всех вариантов
+    q_tokens = set()
+    for v in q_variants_raw:
+        for t in re.split(r"[^a-zа-я0-9]+", v):
+            if len(t) >= 3:
+                q_tokens.add(t)
+
+    import difflib
     exact_matches   = []
     startswith      = []
     contains        = []
     token_matches   = []
-    q_tokens = set(t for t in re.split(r"[^a-zа-я0-9]+", q_raw) if len(t) >= 3)
+    fuzzy_matches   = []
+
+    def _match_bucket(name_norm: str, name_tokens: set):
+        """Определяет в какую корзину попадает имя. None если не совпало."""
+        # Точное совпадение с любым вариантом
+        if name_norm in q_variants_norm:
+            return "exact"
+        # Префикс (только если оба ≥4 символов, иначе слишком широко)
+        for qn in q_variants_norm:
+            if len(qn) >= 4 and len(name_norm) >= 4:
+                if name_norm.startswith(qn) or qn.startswith(name_norm):
+                    return "startswith"
+        # Подстрока (только если длина ≥4)
+        for qn in q_variants_norm:
+            if len(qn) >= 4 and (qn in name_norm or name_norm in qn):
+                return "contains"
+        # Токены
+        if q_tokens and name_tokens and (q_tokens & name_tokens):
+            return "token"
+        # Fuzzy по similarity ratio (обрабатывает опечатки типа tanduri/tandoori)
+        for qn in q_variants_norm:
+            if len(qn) >= 4 and len(name_norm) >= 4:
+                ratio = difflib.SequenceMatcher(None, qn, name_norm).ratio()
+                if ratio >= 0.75:
+                    return "fuzzy"
+        # Fuzzy по токенам — каждый токен запроса близок к какому-то токену имени
+        if q_tokens and name_tokens:
+            matched = 0
+            for qt in q_tokens:
+                if any(difflib.SequenceMatcher(None, qt, nt).ratio() >= 0.8 for nt in name_tokens):
+                    matched += 1
+            if matched == len(q_tokens):
+                return "fuzzy"
+        return None
 
     page = 0
     while True:
@@ -525,24 +595,35 @@ def search_merchants_by_name(query: str, limit: int = 5) -> list:
         for task in tasks:
             m = extract_merchant_data(task)
             name = (m.get("name") or "").lower()
-            name_norm = re.sub(r"[^a-zа-я0-9]+", "", name)
-            if not name_norm:
-                continue
-            if name_norm == q_norm:
+            # Варианты имени: оригинал + транслитерации
+            name_variants_raw = {name, _translit_ru_to_en(name), _translit_en_to_ru(name)}
+            bucket = None
+            for nv in name_variants_raw:
+                nv_norm = re.sub(r"[^a-zа-я0-9]+", "", nv)
+                if not nv_norm:
+                    continue
+                nv_tokens = set(t for t in re.split(r"[^a-zа-я0-9]+", nv) if len(t) >= 3)
+                b = _match_bucket(nv_norm, nv_tokens)
+                _order = ["exact","startswith","contains","token","fuzzy"]
+                if b and (bucket is None or _order.index(b) < _order.index(bucket)):
+                    bucket = b
+                    if bucket == "exact":
+                        break
+            if bucket == "exact":
                 exact_matches.append(m)
-            elif name_norm.startswith(q_norm) or q_norm.startswith(name_norm):
+            elif bucket == "startswith":
                 startswith.append(m)
-            elif q_norm in name_norm or name_norm in q_norm:
+            elif bucket == "contains":
                 contains.append(m)
-            else:
-                name_tokens = set(t for t in re.split(r"[^a-zа-я0-9]+", name) if len(t) >= 3)
-                if q_tokens and name_tokens and (q_tokens & name_tokens):
-                    token_matches.append(m)
+            elif bucket == "token":
+                token_matches.append(m)
+            elif bucket == "fuzzy":
+                fuzzy_matches.append(m)
         if len(tasks) < 100:
             break
         page += 1
 
-    combined = exact_matches + startswith + contains + token_matches
+    combined = exact_matches + startswith + contains + token_matches + fuzzy_matches
     # Убираем дубли по task_id
     seen = set()
     unique = []
@@ -1851,6 +1932,58 @@ async def handle_agent_message(update: Update, context: ContextTypes.DEFAULT_TYP
             task_data = pending["task_data"]
             result = await _create_clickup_task(agent, task_data, phone=None, resolved_merchant=resolved)
         else:
+            # Валидация: похоже ли на телефон?
+            import re as _re
+            stripped = _re.sub(r"[\s\-\(\)\+]", "", text.strip())
+            is_phone_like = stripped.isdigit() and 7 <= len(stripped) <= 15
+
+            if not is_phone_like:
+                # Не телефон — значит агент хочет уточнить мерчанта. Ищем заново.
+                new_query = text.strip()
+                try:
+                    new_candidates = search_merchants_by_name(new_query, limit=5)
+                except Exception as e:
+                    logger.error(f"retry search error: {e}")
+                    new_candidates = []
+
+                if len(new_candidates) == 1:
+                    # Нашли — обновляем и сохраняем состояние, ждём телефон снова
+                    pending["resolved_merchant"] = new_candidates[0]
+                    pending["task_data"]["merchant_name"] = new_candidates[0]["name"]
+                    m = new_candidates[0]
+                    await update.message.reply_text(
+                        f"✅ Найден: *{m['name']}*\n"
+                        f"🆔 MID: `{m.get('mid') or '—'}`\n"
+                        f"🔑 Код: `{m.get('unique_code') or '—'}`\n\n"
+                        f"📞 Теперь укажите *телефон* (или *нет* чтобы пропустить)",
+                        parse_mode="Markdown"
+                    )
+                    return
+                elif len(new_candidates) > 1:
+                    pending["candidates"] = new_candidates
+                    pending["step"] = "pick_merchant"
+                    names_list = "\n".join(
+                        f"{i+1}. *{c['name']}* — MID: `{c.get('mid') or '—'}`, код: `{c.get('unique_code') or '—'}`"
+                        for i, c in enumerate(new_candidates)
+                    )
+                    await update.message.reply_text(
+                        f"🔎 Найдено {len(new_candidates)} мерчантов по *{new_query}*:\n\n"
+                        f"{names_list}\n\n"
+                        f"Напишите *номер* (1-{len(new_candidates)}) или *0* чтобы без мерчанта.",
+                        parse_mode="Markdown"
+                    )
+                    return
+                else:
+                    await update.message.reply_text(
+                        f"❌ По запросу *{new_query}* ничего не найдено.\n\n"
+                        f"Варианты:\n"
+                        f"• Напишите другое имя мерчанта\n"
+                        f"• Напишите *номер телефона* для связи\n"
+                        f"• Напишите *нет* чтобы создать задачу без мерчанта",
+                        parse_mode="Markdown"
+                    )
+                    return
+
             # Принимаем как телефон
             phone = text.strip()
             task_data = pending["task_data"]
