@@ -145,7 +145,7 @@ def get_session(tg_id: int) -> dict:
     now = time.time()
     if tg_id in message_sessions:
         session = message_sessions[tg_id]
-        if now - session["last_time"] < SESSION_TIMEOUT and session.get("ticket_id"):
+        if now - session["last_time"] < SESSION_TIMEOUT:
             session["last_time"] = now
             return session
     message_sessions[tg_id] = {
@@ -157,9 +157,9 @@ def get_session(tg_id: int) -> dict:
 
 
 def close_session(tg_id: int):
-    """Закрывает сессию пользователя."""
+    """Мягко закрывает сессию — сбрасывает тикет, но сохраняет историю сообщений для контекста."""
     if tg_id in message_sessions:
-        del message_sessions[tg_id]
+        message_sessions[tg_id]["ticket_id"] = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -297,7 +297,10 @@ def create_support_ticket(merchant: dict, message: str, ai_analysis: dict) -> st
     priority_label = ai_analysis.get("priority", "Normal")
     emoji = PRIORITY_EMOJI.get(priority_label, "🟡")
 
-    task_name = f"{emoji} [{category}] {merchant['name']} — {message[:50]}"
+    # Используем AI-резюме для названия тикета
+    summary = ai_analysis.get("escalation_summary", "")
+    task_title = summary[:80] if summary else message[:80]
+    task_name = f"{emoji} [{category}] {merchant['name']} — {task_title}"
 
     description = f"""**🏪 Мерчант:** {merchant['name']}
 **🆔 MID:** {merchant['mid']}
