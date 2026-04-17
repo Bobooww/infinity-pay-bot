@@ -249,6 +249,30 @@ agent_sessions  = {}  # {tg_id: {"role": "agent"|"iso", "name": ..., ...}}
 message_sessions = {}
 SESSION_TIMEOUT = 600  # 10 минут
 
+# ─── Долговременная память мерчантов (критически важно) ──────────────────
+# Хранит разговорную историю между сессиями на 30+ дней.
+# Ключ — tg_id, а не merchant_id, потому что у неидентифицированных tg_id нет mid.
+# {tg_id: {
+#   "merchant_name": str,
+#   "merchant_code": str,       # INF-XXX для быстрого поиска
+#   "mid": str,
+#   "exchanges": [              # список диалогов (каждый — пара user/assistant)
+#       {"ts": ts, "user": "...", "assistant": "...", "category": "...", "ticket_id": "T-042"|None},
+#       ...
+#   ],
+#   "summary": str,             # Claude-сгенерированное резюме истории
+#   "summary_updated_at": ts,   # когда обновлялось
+#   "recurring_categories": {"Terminal": 3, "Payment": 1},  # частотность проблем
+#   "last_activity": ts,
+#   "total_tickets": int,
+#   "total_messages": int,
+# }}
+merchant_memory = {}
+MERCHANT_MEMORY_TTL = 30 * 86400       # 30 дней — старше чистим
+MEMORY_MAX_EXCHANGES = 40              # макс диалогов на мерчанта
+MEMORY_CONTEXT_EXCHANGES = 10          # сколько последних подаём в Claude как контекст
+SUMMARIZE_EVERY_N_EXCHANGES = 8        # обновляем резюме каждые N новых обменов
+
 # ─── FAQ кеш ─────────────────────────────────────────────────────────────
 faq_cache = {}  # {"вопрос_хеш": {"answer": str, "hits": int, "last_used": ts}}
 FAQ_CACHE_MAX = 200
@@ -408,8 +432,8 @@ def cleanup_faq_cache():
 
 # Persistence functions
 def load_state():
-    """Load merchant_cache, ticket_to_tg, notification_cache, short IDs from disk."""
-    global merchant_cache, ticket_to_tg, notification_cache, short_to_clickup, clickup_to_short, ticket_counter
+    """Load merchant_cache, ticket_to_tg, notification_cache, short IDs, merchant_memory from disk."""
+    global merchant_cache, ticket_to_tg, notification_cache, short_to_clickup, clickup_to_short, ticket_counter, merchant_memory
     try:
         if STATE_FILE.exists():
             data = json.loads(STATE_FILE.read_text(encoding='utf-8'))
@@ -419,9 +443,13 @@ def load_state():
             short_to_clickup.update(data.get('short_to_clickup', {}))
             clickup_to_short.update(data.get('clickup_to_short', {}))
             ticket_counter = data.get('ticket_counter', 0)
+            # Долгосрочная память мерчантов — ключи tg_id приходят строками из JSON
+            loaded_mem = data.get('merchant_memory', {})
+            merchant_memory.update({int(k): v for k, v in loaded_mem.items()})
             logger.info(
                 f'State loaded: {len(merchant_cache)} merchants, '
-                f'{len(ticket_to_tg)} tickets, short_ids counter={ticket_counter}'
+                f'{len(ticket_to_tg)} tickets, short_ids counter={ticket_counter}, '
+                f'memory entries={len(merchant_memory)}'
             )
     except Exception as e:
         logger.error(f'Failed to load state: {e}')
@@ -438,6 +466,7 @@ def save_state():
             'short_to_clickup': short_to_clickup,
             'clickup_to_short': clickup_to_short,
             'ticket_counter': ticket_counter,
+            'merchant_memory': {str(k): v for k, v in merchant_memory.items()},
             'saved_at': datetime.utcnow().isoformat(),
         }
         STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -1014,6 +1043,21 @@ async def _create_and_confirm_ticket(update: Update, session: dict, merchant: di
         category = analysis.get("category", "General")
         emoji = PRIORITY_EMOJI.get(priority, "🟡")
 
+        # Сохраняем тикет в долгосрочную память мерчанта
+        try:
+            tg_id = update.effective_user.id
+            short_id = clickup_to_short.get(ticket_id, ticket_id[:8])
+            record_merchant_exchange(
+                tg_id=tg_id,
+                merchant=merchant,
+                user_message=problem_text,
+                ai_reply=f"[Создан тикет {short_id} — {category} / {priority}]",
+                category=category,
+                ticket_id=short_id,
+            )
+        except Exception as e:
+            logger.error(f"memory record on ticket failed: {e}")
+
         await update.message.reply_text(
             f"✅ *Заявка принята!*\n\n"
             f"{emoji} Приоритет: *{priority}*\n"
@@ -1232,12 +1276,168 @@ def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) 
         }
 
 
-def respond_to_merchant(merchant: dict, session: dict, new_message: str) -> str:
+# ═══════════════════════════════════════════════════════════════════════════
+# ДОЛГОСРОЧНАЯ ПАМЯТЬ МЕРЧАНТОВ
+# ═══════════════════════════════════════════════════════════════════════════
+
+def get_merchant_memory(tg_id: int, merchant: dict | None = None) -> dict:
+    """Возвращает (создавая при необходимости) долгосрочную память мерчанта."""
+    if tg_id not in merchant_memory:
+        merchant_memory[tg_id] = {
+            "merchant_name":        (merchant or {}).get("name", ""),
+            "merchant_code":        (merchant or {}).get("merchant_code", ""),
+            "mid":                  (merchant or {}).get("mid", ""),
+            "exchanges":            [],
+            "summary":              "",
+            "summary_updated_at":   0,
+            "recurring_categories": {},
+            "last_activity":        time.time(),
+            "total_tickets":        0,
+            "total_messages":       0,
+        }
+    mem = merchant_memory[tg_id]
+    # Обновляем метаданные из merchant при каждом обращении (имя могло поменяться)
+    if merchant:
+        if merchant.get("name"):           mem["merchant_name"] = merchant["name"]
+        if merchant.get("merchant_code"):  mem["merchant_code"] = merchant["merchant_code"]
+        if merchant.get("mid"):            mem["mid"]           = merchant["mid"]
+    return mem
+
+
+def cleanup_merchant_memory():
+    """Чистит записи старше MERCHANT_MEMORY_TTL и обрезает длинные истории."""
+    now = time.time()
+    expired = [tg for tg, m in merchant_memory.items()
+               if now - m.get("last_activity", 0) > MERCHANT_MEMORY_TTL]
+    for tg in expired:
+        del merchant_memory[tg]
+    # Обрезаем длинные истории у активных
+    for mem in merchant_memory.values():
+        if len(mem["exchanges"]) > MEMORY_MAX_EXCHANGES:
+            mem["exchanges"] = mem["exchanges"][-MEMORY_MAX_EXCHANGES:]
+
+
+def record_merchant_exchange(
+    tg_id: int,
+    merchant: dict,
+    user_message: str,
+    ai_reply: str,
+    category: str = "",
+    ticket_id: str | None = None,
+):
+    """Сохраняет пару user/assistant в долгосрочную память + обновляет метрики."""
+    mem = get_merchant_memory(tg_id, merchant)
+    mem["exchanges"].append({
+        "ts":        time.time(),
+        "user":      user_message[:2000],   # гард от огромных сообщений
+        "assistant": (ai_reply or "")[:2000],
+        "category":  category or "",
+        "ticket_id": ticket_id,
+    })
+    # Трим если превысили лимит
+    if len(mem["exchanges"]) > MEMORY_MAX_EXCHANGES:
+        mem["exchanges"] = mem["exchanges"][-MEMORY_MAX_EXCHANGES:]
+    if category:
+        mem["recurring_categories"][category] = mem["recurring_categories"].get(category, 0) + 1
+    if ticket_id:
+        mem["total_tickets"] += 1
+    mem["total_messages"] += 1
+    mem["last_activity"] = time.time()
+
+    # Периодически пересчитываем резюме (раз в N новых обменов)
+    total = mem["total_messages"]
+    if total % SUMMARIZE_EVERY_N_EXCHANGES == 0 and total > 0:
+        try:
+            new_summary = summarize_merchant_history(mem)
+            if new_summary:
+                mem["summary"] = new_summary
+                mem["summary_updated_at"] = time.time()
+        except Exception as e:
+            logger.error(f"summarize error tg={tg_id}: {e}")
+    save_state()
+
+
+def summarize_merchant_history(mem: dict) -> str:
+    """Просит Haiku сделать краткое резюме истории мерчанта.
+    Возвращает 3-5 строк: частые проблемы, последняя активность, рекомендации.
+    """
+    if not mem.get("exchanges"):
+        return ""
+    # Собираем последние 20 обменов в текст
+    lines = []
+    for ex in mem["exchanges"][-20:]:
+        ts = datetime.utcfromtimestamp(ex["ts"]).strftime("%Y-%m-%d")
+        cat = f"[{ex.get('category','')}]" if ex.get("category") else ""
+        lines.append(f"{ts} {cat} M: {ex['user'][:200]}")
+        if ex.get("assistant"):
+            lines.append(f"       A: {ex['assistant'][:200]}")
+    history_text = "\n".join(lines)
+
+    prompt = f"""Сожми историю разговоров мерчанта в 4-6 строк.
+Укажи: основные повторяющиеся проблемы, последнее состояние, контекст для следующего разговора.
+Формат: краткие буллеты. Язык — русский.
+
+История:
+{history_text}
+
+Резюме:"""
+    try:
+        resp = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            system="Ты сжимаешь историю клиента поддержки в компактное резюме.",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        stats["haiku_calls"] += 1
+        return resp.content[0].text.strip()
+    except Exception as e:
+        logger.error(f"summarize_merchant_history failed: {e}")
+        return mem.get("summary", "")
+
+
+def build_memory_context(mem: dict) -> tuple[str, list[dict]]:
+    """Строит контекст для respond_to_merchant из долгосрочной памяти.
+
+    Возвращает (memory_block, past_messages):
+    - memory_block: текст для вставки в system prompt (резюме + recurring)
+    - past_messages: последние N обменов в формате messages API
+    """
+    memory_block = ""
+    if mem.get("summary"):
+        updated = ""
+        if mem.get("summary_updated_at"):
+            updated = datetime.utcfromtimestamp(mem["summary_updated_at"]).strftime("%Y-%m-%d")
+        memory_block += f"\n\nИСТОРИЯ МЕРЧАНТА (резюме на {updated}):\n{mem['summary']}"
+    recurring = mem.get("recurring_categories", {})
+    if recurring:
+        top = sorted(recurring.items(), key=lambda x: -x[1])[:4]
+        rec_str = ", ".join(f"{cat}×{cnt}" for cat, cnt in top)
+        memory_block += f"\n\nЧАСТЫЕ КАТЕГОРИИ ОБРАЩЕНИЙ: {rec_str}"
+    if mem.get("total_tickets"):
+        memory_block += f"\nВсего тикетов за последнее время: {mem['total_tickets']}"
+
+    # Последние N обменов как многошаговый контекст
+    past = mem.get("exchanges", [])[-MEMORY_CONTEXT_EXCHANGES:]
+    messages = []
+    for ex in past:
+        # Префикс с датой помогает Claude понимать что это старый разговор
+        ts = datetime.utcfromtimestamp(ex["ts"]).strftime("%d.%m %H:%M")
+        user_txt = f"[{ts}] {ex['user']}"
+        messages.append({"role": "user", "content": user_txt})
+        if ex.get("assistant"):
+            messages.append({"role": "assistant", "content": ex["assistant"]})
+    return memory_block, messages
+
+
+def respond_to_merchant(merchant: dict, session: dict, new_message: str, tg_id: int | None = None) -> str:
     """Настоящий многошаговый диалог — Haiku с историей разговора.
 
     Передаёт в Claude полную историю: все сообщения мерчанта и все предыдущие
     ответы бота. Claude отвечает как живой сотрудник поддержки, а не JSON-машина.
     Если Haiku не справляется — escalates to Sonnet.
+
+    НОВОЕ: подтягивает долгосрочную память мерчанта (до 30 дней) — Claude помнит
+    проблемы мерчанта из прошлых разговоров.
     """
     system = MERCHANT_CHAT_SYSTEM.format(
         name=merchant.get("name", ""),
@@ -1245,16 +1445,34 @@ def respond_to_merchant(merchant: dict, session: dict, new_message: str) -> str:
         business_type=merchant.get("business_type", "Ресторан"),
     )
 
+    # Добавляем долгосрочную память в system prompt
+    memory_msgs: list[dict] = []
+    if tg_id is not None:
+        mem = get_merchant_memory(tg_id, merchant)
+        mem_block, memory_msgs = build_memory_context(mem)
+        if mem_block:
+            system += mem_block
+
     # Строим полноценную историю разговора для Claude
     past_msgs    = session.get("messages", [])[:-1]   # все кроме текущего
     past_replies = session.get("ai_responses", [])
 
-    messages = []
+    # Сначала — долгосрочная память (прошлые дни), потом текущая сессия
+    messages = list(memory_msgs)
     for i, user_msg in enumerate(past_msgs):
         messages.append({"role": "user", "content": user_msg})
         if i < len(past_replies):
             messages.append({"role": "assistant", "content": past_replies[i]})
     messages.append({"role": "user", "content": new_message})
+
+    # Anthropic API требует чередования user/assistant. Схлопываем подряд идущие user.
+    merged: list[dict] = []
+    for m in messages:
+        if merged and merged[-1]["role"] == m["role"]:
+            merged[-1]["content"] = merged[-1]["content"] + "\n\n" + m["content"]
+        else:
+            merged.append(dict(m))
+    messages = merged
 
     for model in ("claude-haiku-4-5-20251001", "claude-sonnet-4-6"):
         try:
@@ -1404,6 +1622,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔒 Только для авторизованных агентов.")
         return
     s = stats
+    mem_count = len(merchant_memory)
+    mem_exchanges = sum(len(m.get("exchanges", [])) for m in merchant_memory.values())
+    mem_summaries = sum(1 for m in merchant_memory.values() if m.get("summary"))
     text = (
         f"📊 *Статистика бота*\n\n"
         f"💬 Всего сообщений: {s['total_messages']}\n"
@@ -1411,6 +1632,10 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🤖 AI ответил сам: {s['ai_direct_answers']}\n"
         f"⬆️ Эскалаций: {s['escalations']}\n"
         f"🎙 Голосовых: {s['voice_messages']}\n\n"
+        f"*Память мерчантов:*\n"
+        f"🧠 В памяти: {mem_count} мерчантов\n"
+        f"📜 Всего обменов: {mem_exchanges}\n"
+        f"📝 Резюме сгенерировано: {mem_summaries}\n\n"
         f"*AI вызовы:*\n"
         f"⚡ Haiku: {s['haiku_calls']}\n"
         f"🧠 Sonnet: {s['sonnet_calls']}\n"
@@ -1618,12 +1843,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if confidence >= 85 and not should_escalate:
         # ── Шаг 2: генерируем живой ответ с историей диалога ────────────────
         # Отдельный вызов Claude с полной conversational историей → качественный ответ
-        ai_reply = respond_to_merchant(merchant, session, message_text)
+        # tg_id подтягивает долгосрочную память мерчанта (30 дней)
+        ai_reply = respond_to_merchant(merchant, session, message_text, tg_id=tg_id)
 
         stats["ai_direct_answers"] += 1
         session["mode"] = "self_help"
         session["last_analysis"] = analysis
         session["ai_responses"].append(ai_reply)   # сохраняем для следующего хода
+
+        # Сохраняем в долгосрочную память
+        record_merchant_exchange(
+            tg_id=tg_id,
+            merchant=merchant,
+            user_message=message_text,
+            ai_reply=ai_reply,
+            category=analysis.get("category", ""),
+            ticket_id=None,
+        )
 
         await update.message.reply_text(ai_reply)
         await update.message.reply_text(
@@ -2383,7 +2619,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "*Мерчанты:*\n"
             "/addmerchant — добавить мерчанта (3 шага)\n"
             "/code Pizza Palace — узнать код существующего\n"
-            "/code new Pizza Palace — быстро создать + код\n\n"
+            "/code new Pizza Palace — быстро создать + код\n"
+            "/history Pizza Palace — прошлые обращения (до 30 дней)\n"
+            "/history — топ-10 активных мерчантов\n\n"
             "*Остальное:*\n"
             "/stats — статистика\n"
             "/logout — выйти\n"
@@ -2913,6 +3151,146 @@ async def _reply_merchant_list(update: Update, candidates: list, query: str):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# /history — история обращений мерчанта (только агенты)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _find_memory_for_query(query: str) -> tuple[int | None, dict | None]:
+    """По строке запроса (код, MID, имя, tg_id) находит запись в merchant_memory.
+    Возвращает (tg_id, memory_dict) или (None, None).
+    """
+    q = query.strip()
+    q_upper = q.upper()
+
+    # 1. По tg_id если число
+    if q.isdigit() and len(q) <= 12:
+        tg = int(q)
+        if tg in merchant_memory:
+            return tg, merchant_memory[tg]
+
+    # 2. По коду INF-XXX
+    if q_upper.startswith("INF-"):
+        for tg, mem in merchant_memory.items():
+            if (mem.get("merchant_code") or "").upper() == q_upper:
+                return tg, mem
+
+    # 3. По MID
+    if q.isdigit() and len(q) >= 8:
+        for tg, mem in merchant_memory.items():
+            if (mem.get("mid") or "").strip() == q:
+                return tg, mem
+
+    # 4. По имени (fuzzy: substring, case-insensitive)
+    q_lower = q.lower()
+    matches = []
+    for tg, mem in merchant_memory.items():
+        nm = (mem.get("merchant_name") or "").lower()
+        if q_lower in nm:
+            matches.append((tg, mem))
+    if len(matches) == 1:
+        return matches[0]
+    # Несколько — вернём самый свежий
+    if matches:
+        matches.sort(key=lambda x: x[1].get("last_activity", 0), reverse=True)
+        return matches[0]
+
+    return None, None
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/history <код|MID|имя|tg_id> — показать историю проблем мерчанта.
+    Только для агентов/ISO.
+    """
+    if not await _agent_only_check(update):
+        return
+
+    args = context.args
+    if not args:
+        # Показываем топ 10 активных мерчантов из памяти
+        if not merchant_memory:
+            await update.message.reply_text(
+                "📭 Память пуста — мерчанты ещё не писали после последнего запуска бота.\n\n"
+                "Использование: `/history <код|имя|MID>`",
+                parse_mode="Markdown"
+            )
+            return
+        top = sorted(
+            merchant_memory.items(),
+            key=lambda x: x[1].get("last_activity", 0),
+            reverse=True
+        )[:10]
+        lines = ["📚 *Последние активные мерчанты* (из памяти):\n"]
+        for i, (tg, mem) in enumerate(top, 1):
+            nm    = mem.get("merchant_name") or f"tg:{tg}"
+            code  = mem.get("merchant_code") or "—"
+            msgs  = mem.get("total_messages", 0)
+            tix   = mem.get("total_tickets", 0)
+            last  = mem.get("last_activity", 0)
+            ago   = ""
+            if last:
+                delta = time.time() - last
+                if delta < 3600:   ago = f"{int(delta/60)}м назад"
+                elif delta < 86400: ago = f"{int(delta/3600)}ч назад"
+                else:              ago = f"{int(delta/86400)}д назад"
+            lines.append(f"{i}. *{nm}* `{code}` — {msgs} сообщ / {tix} тикетов ({ago})")
+        lines.append("\n_Используй_ `/history <код|имя>` _для подробностей._")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+
+    query = " ".join(args).strip()
+    tg_id, mem = _find_memory_for_query(query)
+
+    if not mem:
+        await update.message.reply_text(
+            f"❌ По запросу *{query}* в памяти ничего нет.\n\n"
+            f"Мерчант не писал боту после последнего перезапуска, "
+            f"либо имя/код не совпадает.\n\n"
+            f"Попробуй `/code {query}` чтобы проверить что он вообще зарегистрирован.",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Собираем красивый вывод
+    nm    = mem.get("merchant_name") or f"tg:{tg_id}"
+    code  = mem.get("merchant_code") or "—"
+    mid   = mem.get("mid") or "—"
+    msgs  = mem.get("total_messages", 0)
+    tix   = mem.get("total_tickets", 0)
+    recurring = mem.get("recurring_categories", {}) or {}
+    summary = mem.get("summary") or "_(резюме ещё не сгенерировано)_"
+
+    header = (
+        f"📚 *История: {nm}*\n"
+        f"🔑 `{code}` / 🆔 `{mid}` / tg `{tg_id}`\n"
+        f"💬 {msgs} сообщ. / 🎫 {tix} тикетов\n"
+    )
+    if recurring:
+        top_cats = sorted(recurring.items(), key=lambda x: -x[1])[:5]
+        cats_str = ", ".join(f"{cat}×{cnt}" for cat, cnt in top_cats)
+        header += f"📊 Категории: {cats_str}\n"
+
+    body = f"\n*Резюме Claude:*\n{summary}\n"
+
+    # Последние 10 обменов
+    exchanges = mem.get("exchanges", [])[-10:]
+    if exchanges:
+        body += "\n*Последние обращения:*\n"
+        for ex in exchanges:
+            ts_fmt = datetime.utcfromtimestamp(ex["ts"]).strftime("%d.%m %H:%M")
+            cat    = ex.get("category") or ""
+            user   = (ex.get("user") or "").replace("\n", " ")[:120]
+            tkt    = ex.get("ticket_id")
+            tkt_str = f" 🎫`{tkt}`" if tkt else ""
+            cat_str = f" [{cat}]" if cat else ""
+            body += f"• `{ts_fmt}`{cat_str}{tkt_str} — {user}\n"
+
+    full = header + body
+    # Telegram лимит сообщения ~4000 символов — обрезаем при необходимости
+    if len(full) > 3800:
+        full = full[:3800] + "…\n\n_(обрезано)_"
+    await update.message.reply_text(full, parse_mode="Markdown")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2951,6 +3329,7 @@ def main():
     app.add_handler(CommandHandler("status", status_ticket_command))
     app.add_handler(CommandHandler("ticket", ticket_info_command))
     app.add_handler(CommandHandler("code", code_command))
+    app.add_handler(CommandHandler("history", history_command))
 
     # Голосовые
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
@@ -2960,6 +3339,19 @@ def main():
 
     # Периодическая проверка тикетов (каждые 2 мин)
     app.job_queue.run_repeating(check_ticket_updates, interval=120, first=30)
+
+    # Периодическая чистка долгосрочной памяти (раз в 6 часов)
+    async def _memory_maintenance(ctx):
+        try:
+            before = len(merchant_memory)
+            cleanup_merchant_memory()
+            after = len(merchant_memory)
+            if before != after:
+                logger.info(f"memory cleanup: {before} → {after} мерчантов")
+            save_state()
+        except Exception as e:
+            logger.error(f"memory maintenance error: {e}")
+    app.job_queue.run_repeating(_memory_maintenance, interval=6 * 3600, first=3600)
 
     print("✅ Бот v2 запущен. Ctrl+C для остановки.\n")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
