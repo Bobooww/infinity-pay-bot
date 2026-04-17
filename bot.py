@@ -2339,7 +2339,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/priority T-042 urgent — сменить приоритет (urgent/high/normal/low)\n"
             "/status T-042 done — сменить статус\n\n"
             "*Мерчанты:*\n"
-            "/addmerchant — добавить мерчанта\n\n"
+            "/addmerchant — добавить мерчанта (3 шага)\n"
+            "/code Pizza Palace — узнать код существующего\n"
+            "/code new Pizza Palace — быстро создать + код\n\n"
             "*Остальное:*\n"
             "/stats — статистика\n"
             "/logout — выйти\n"
@@ -2695,6 +2697,180 @@ async def status_ticket_command(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# /code — быстрый запрос INF-кода мерчанта
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _clean_merchant_name(n: str) -> str:
+    """Срезает '| MID: ...' или '| INF-XXX' суффикс из имени для красивого вывода."""
+    if "|" in n:
+        n = n.split("|")[0]
+    return n.strip()
+
+
+def _invite_template(code: str) -> str:
+    """Готовое сообщение для мерчанта с его кодом."""
+    return (
+        "Добро пожаловать в Infinity Pay! 🎉\n"
+        "Для поддержки пишите в @InfinityPaySupportBot\n"
+        f"Ваш персональный код: {code}\n"
+        "Отправьте /start → потом код."
+    )
+
+
+async def code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/code <имя|MID|INF-XXX> — показать код существующего мерчанта.
+    /code new <имя> — быстро создать нового мерчанта (только имя) и получить код.
+    """
+    if not await _agent_only_check(update):
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "🔑 *Запрос кода мерчанта*\n\n"
+            "*Найти код существующего:*\n"
+            "`/code Pizza Palace` — по имени\n"
+            "`/code 4754792901000006` — по MID\n"
+            "`/code INF-042` — по коду\n\n"
+            "*Быстро создать нового (только имя):*\n"
+            "`/code new Pizza Palace`\n"
+            "_MID и телефон можно добавить позже_\n\n"
+            "*Полная регистрация (3 шага):* /addmerchant",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ── Режим быстрого создания: /code new <имя> ──────────────────────
+    if args[0].lower() in ("new", "новый", "+"):
+        name = " ".join(args[1:]).strip()
+        if not name:
+            await update.message.reply_text(
+                "Укажи имя: `/code new Pizza Palace`",
+                parse_mode="Markdown"
+            )
+            return
+        await update.message.reply_text("⏳ Создаю мерчанта и генерирую код...")
+        try:
+            code    = generate_unique_merchant_code()
+            task_id = create_merchant_in_clickup(name, "", "", code)
+        except Exception as e:
+            logger.error(f"/code new create error: {e}")
+            task_id = None
+        if task_id:
+            tmpl = _invite_template(code)
+            await update.message.reply_text(
+                f"✅ *Новый мерчант создан*\n\n"
+                f"🏪 Имя: *{name}*\n"
+                f"🔑 Код: `{code}`\n\n"
+                f"📋 *Готовое сообщение для мерчанта:*\n\n"
+                f"```\n{tmpl}\n```\n\n"
+                f"_MID и телефон позже через /addmerchant или ClickUp_",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Не удалось создать мерчанта в ClickUp. Попробуй /addmerchant"
+            )
+        return
+
+    # ── Режим поиска ──────────────────────────────────────────────────
+    query = " ".join(args).strip()
+
+    # 1. По точному коду INF-XXX
+    if query.upper().startswith("INF-"):
+        try:
+            m = search_merchant_by_code(query)
+        except Exception as e:
+            logger.error(f"/code search_by_code error: {e}")
+            m = None
+        if m:
+            await _reply_merchant_code(update, m)
+            return
+
+    # 2. По MID (только цифры, длина >= 8)
+    if query.isdigit() and len(query) >= 8:
+        try:
+            cands = search_merchants_by_name(query, limit=5)
+        except Exception as e:
+            logger.error(f"/code search_by_mid error: {e}")
+            cands = []
+        # Фильтруем: берём только те у кого MID == query
+        exact_mid = [c for c in cands if (c.get("mid") or "").strip() == query]
+        if len(exact_mid) == 1:
+            await _reply_merchant_code(update, exact_mid[0])
+            return
+        if exact_mid:
+            await _reply_merchant_list(update, exact_mid, query)
+            return
+
+    # 3. Fuzzy по имени
+    try:
+        candidates = search_merchants_by_name(query, limit=10)
+    except Exception as e:
+        logger.error(f"/code search_by_name error: {e}")
+        candidates = []
+
+    if not candidates:
+        await update.message.reply_text(
+            f"❌ Мерчант по запросу *{query}* не найден.\n\n"
+            f"Попробуй:\n"
+            f"• `/code new {query}` — создать с этим именем и получить код\n"
+            f"• /addmerchant — полная регистрация (имя + MID + телефон)",
+            parse_mode="Markdown"
+        )
+        return
+
+    if len(candidates) == 1:
+        await _reply_merchant_code(update, candidates[0])
+        return
+
+    await _reply_merchant_list(update, candidates, query)
+
+
+async def _reply_merchant_code(update: Update, m: dict):
+    """Красивый вывод одного мерчанта с кодом + готовый шаблон."""
+    name  = _clean_merchant_name(m.get("name") or "—")
+    code  = (m.get("unique_code") or "").strip()
+    mid   = (m.get("mid") or "").strip() or "—"
+    phone = (m.get("phone") or "").strip() or "—"
+    tg_id = (m.get("telegram_id") or "").strip()
+    activated = "🟢 активирован" if tg_id else "⚪ не активирован"
+
+    if not code:
+        await update.message.reply_text(
+            f"⚠️ *{name}* — код не назначен в ClickUp.\n\n"
+            f"Используй /addmerchant чтобы создать заново, "
+            f"или обнови поле *Unique Code* в карточке ClickUp вручную.",
+            parse_mode="Markdown"
+        )
+        return
+
+    tmpl = _invite_template(code)
+    await update.message.reply_text(
+        f"🏪 *{name}*\n"
+        f"🔑 Код: `{code}`\n"
+        f"🆔 MID: `{mid}`\n"
+        f"📞 Телефон: {phone}\n"
+        f"📱 Telegram: {activated}\n\n"
+        f"📋 *Готовое сообщение для мерчанта:*\n\n"
+        f"```\n{tmpl}\n```",
+        parse_mode="Markdown"
+    )
+
+
+async def _reply_merchant_list(update: Update, candidates: list, query: str):
+    """Несколько совпадений — показываем список."""
+    lines = [f"🔎 Найдено *{len(candidates)}* мерчантов по *{query}*:\n"]
+    for i, c in enumerate(candidates[:10], 1):
+        nm = _clean_merchant_name(c.get("name") or "?")
+        code = c.get("unique_code") or "—"
+        mid  = c.get("mid") or "—"
+        lines.append(f"{i}. *{nm}*\n   🔑 `{code}`   🆔 `{mid}`")
+    lines.append("\n_Уточни запрос или вызови `/code INF-XXX` напрямую._")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2732,6 +2908,7 @@ def main():
     app.add_handler(CommandHandler("priority", priority_ticket_command))
     app.add_handler(CommandHandler("status", status_ticket_command))
     app.add_handler(CommandHandler("ticket", ticket_info_command))
+    app.add_handler(CommandHandler("code", code_command))
 
     # Голосовые
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
