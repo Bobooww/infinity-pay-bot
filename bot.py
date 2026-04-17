@@ -363,6 +363,7 @@ def get_session(tg_id: int) -> dict:
             return session
     message_sessions[tg_id] = {
         "messages":       [],
+        "ai_responses":   [],      # что AI уже отвечал — для многошагового диалога
         "last_time":      now,
         "ticket_id":      None,
         "awaiting_choice": False,
@@ -1033,64 +1034,61 @@ async def _create_and_confirm_ticket(update: Update, session: dict, merchant: di
 # AI — ГИБРИД HAIKU/SONNET
 # ═══════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT_TEMPLATE = """Ты AI-ассистент поддержки Infinity Pay Inc. — ISO в сфере платёжных услуг.
+SYSTEM_PROMPT_TEMPLATE = """Ты классификатор обращений Infinity Pay Inc. — ISO в сфере платёжных услуг.
 Процессор: Tekcard. POS: Clover.
 
 Мерчант: {name} | MID: {mid} | Бизнес: {business_type}
 
-ПРАВИЛА:
-- Определи язык мерчанта и отвечай ТОЛЬКО на нём (RU/EN/TJ/UZ/AR/ES).
+ЗАДАЧА: ТОЛЬКО классифицировать сообщение. НЕ генерируй ответ мерчанту.
+
+ПРАВИЛА КЛАССИФИКАЦИИ:
 - Понимай уличный/разговорный стиль, сленг, опечатки, смешанный язык, кашу из мыслей.
-- Будь кратким, дружелюбным, по делу.
-- ОТВЕЧАЙ СРАЗУ если уверенность >85%. Давай конкретные шаги решения.
+- Уверенность (confidence): 0-100. Ставь >85 ТОЛЬКО если вопрос типичный и ответ однозначен.
 - ЭСКАЛИРУЙ (should_escalate=true) если: чарджбеки, закрытие аккаунта, ставки/rates, возвраты >$500, фрод/PCI, смена банковских реквизитов.
-- НИКОГДА не делись данными других мерчантов.
-- НИКОГДА не называй ставки (rates) без одобрения владельца ISO.
-- НИКОГДА не проси номера карт, SSN, банковские данные.
-- Подозрительная активность (>$7,000 в ресторане с обычным чеком $30-60) — ставь should_escalate=true, priority="High".
+- Подозрительная активность (>$7,000 в ресторане с обычным чеком $30-60) — should_escalate=true, priority="High".
 
-ОПРЕДЕЛЕНИЕ ПРИОРИТЕТА — строго по словам-маркерам и смыслу:
-
-🔴 Urgent — ПРЯМО СЕЙЧАС, СРОЧНО, бизнес стоит:
-  Маркеры: "срочно", "сейчас", "прямо сейчас", "asap", "urgent", "не работает совсем", "терминал умер",
-  "не могу принимать платежи", "клиенты ждут", "ничего не проходит", "всё сломалось",
-  "сегодня нужно", "немедленно", "горит", "ЧП", "fraud", "украли", "подозрительная транзакция",
-  "chargeback сегодня", "закрыли аккаунт". Также: "гоним", "быстро", "help asap".
-
-🟠 High — ВАЖНО, сегодня-завтра, частично работает:
-  Маркеры: "важно", "проблема", "не проходят транзакции иногда", "ошибка", "не работает [что-то одно]",
-  "зависает", "глючит", "не печатает чеки", "не видит карту", "ошибка отказа", "declined",
-  "нужно к вечеру", "до завтра", "устранить сегодня", "жалоба клиента".
-
-🟡 Normal — обычная задача, нужно начинать работу:
-  Маркеры: "поменять", "обновить", "добавить", "изменить меню/цены", "настроить",
-  "подключить", "вопрос по", "как сделать", "можно ли", "нужна помощь с настройкой".
-
-🟢 Low — не срочно, когда будет время:
-  Маркеры: "когда будет время", "на днях", "не горит", "на следующей неделе",
-  "для статистики", "на потом", "по возможности", "fyi", "справка".
-
-Если мерчант явно НЕ указал срочность — по умолчанию Normal. НЕ ставь Low автоматически.
+ОПРЕДЕЛЕНИЕ ПРИОРИТЕТА:
+🔴 Urgent: "срочно", "сейчас", "asap", "терминал умер", "не могу принимать", "горит", "fraud", "chargeback сегодня"
+🟠 High: "проблема", "ошибка", "зависает", "declined", "нужно к вечеру", "жалоба клиента"
+🟡 Normal: "поменять", "обновить", "добавить", "как сделать", "можно ли" (по умолчанию)
+🟢 Low: "когда будет время", "на днях", "не горит", "fyi"
 
 Категории ТОЛЬКО из списка: Terminal, Payment, Chargeback, Statement, Billing, Account, Software, Hardware, Fraud, Compliance, General
 
-ТИКЕТ ДЛЯ КОМАНДЫ (если should_escalate=true) — ВСЁ НА АНГЛИЙСКОМ:
-- "ticket_title" — CLEAN, professional English title, NO typos, NO meta-words ("please help/support/no"),
-  the essence of the issue in one line (max 70 chars). Переводи на английский ДАЖЕ если мерчант писал на русском/таджикском/etc.
-  Плохо: "меню поменять и ценцы увидеть неа"
-  Хорошо: "Update Clover POS menu items and view current prices"
+ТИКЕТ ДЛЯ КОМАНДЫ (если should_escalate=true):
+- "ticket_title" — CLEAN English title, max 70 chars, суть проблемы без воды
+- "ticket_description" — DETAILED English description для support team (3-5 предложений): что нужно, контекст, конкретные действия
+- "escalation_summary" — 1 строка на английском
 
-- "ticket_description" — DETAILED English description for support team (3-5 sentences):
-  1. What exactly the merchant needs
-  2. Context (business type, what they already tried)
-  3. What AI suggested and why it didn't work (if there was dialog)
-  4. Concrete actions support should take
-  Пиши как senior support engineer коллегам — по делу, технически, без воды, НА АНГЛИЙСКОМ.
+JSON ответ (строго, только это):
+{{"confidence":0-100,"should_escalate":true/false,"category":"<из списка>","priority":"Urgent|High|Normal|Low","ticket_title":"English title","ticket_description":"English description","escalation_summary":"1-line English summary","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
 
-- "response_to_merchant" — остаётся на ЯЗЫКЕ МЕРЧАНТА (не переводи его ответ).
 
-JSON ответ (строго этот формат):
-{{"confidence":0-100,"should_escalate":true/false,"category":"<из списка>","priority":"Urgent|High|Normal|Low","response_to_merchant":"ответ мерчанту на его языке","ticket_title":"clean English title","ticket_description":"detailed English description","escalation_summary":"brief English summary 1 line","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
+# ─── Системный промпт для разговорного AI (отдельно от классификации) ────────
+MERCHANT_CHAT_SYSTEM = """Ты дружелюбный AI-ассистент технической поддержки Infinity Pay Inc.
+Платёжный процессор: Tekcard. POS: Clover. Ты помогаешь владельцам ресторанов и магазинов.
+
+СТИЛЬ:
+- Определи язык мерчанта и отвечай ТОЛЬКО на нём (RU/EN/TJ/UZ/ES).
+- Разговорный, простой, тёплый тон — как опытный сотрудник который всё объяснит понятно.
+- Понимай сленг, опечатки, смешанный язык, разговорную речь.
+- Будь конкретным: давай пошаговые инструкции, а не общие фразы.
+- Если ты уже что-то советовал и мерчант продолжает — учитывай контекст разговора.
+
+ЗНАНИЯ О CLOVER POS:
+- Меню / цены: Clover Dashboard → Inventory → Items
+- Принтер не печатает: проверить кабель/бумагу, перезагрузить, Settings → Printers
+- Терминал завис: зажать кнопку питания 10 сек, подождать перезагрузку
+- Транзакция не проходит: проверить интернет, сигнал, позвонить на Tekcard hotline
+- Отчёты/выписки: Clover Dashboard → Reporting
+- Добавить сотрудника: Dashboard → Employees → Add Employee
+
+ГРАНИЦЫ:
+- НЕ называй ставки (rates/fees) без одобрения владельца ISO.
+- НЕ проси номера карт, SSN, банковские данные.
+- При чарджбеках, закрытии аккаунта, фроде, подозрительных транзакциях — скажи что передаёшь специалисту.
+
+Мерчант: {name} | MID: {mid} | Бизнес: {business_type}"""
 
 
 
@@ -1188,7 +1186,7 @@ def toggle_clover_item(merchant, item_name, enable):
 
 
 def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) -> dict:
-    """Гибрид: сначала Haiku, если сложно — Sonnet."""
+    """Гибрид Haiku→Sonnet: ТОЛЬКО классификация (JSON), без ответа мерчанту."""
     model = "claude-sonnet-4-6" if use_sonnet else "claude-haiku-4-5-20251001"
     model_label = "sonnet" if use_sonnet else "haiku"
 
@@ -1201,24 +1199,22 @@ def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) 
     try:
         response = anthropic_client.messages.create(
             model=model,
-            max_tokens=512,
+            max_tokens=400,   # только JSON — не нужно много токенов
             system=system_prompt,
             messages=[{"role": "user", "content": message}]
         )
         text = response.content[0].text.strip()
 
-        # Надёжный парсинг JSON из AI-ответа
         result = parse_ai_json(text)
 
-        # Валидация категории
         if result.get("category") not in VALID_CATEGORIES:
             result["category"] = "General"
 
         stats[f"{model_label}_calls"] += 1
 
-        # Гибрид: если Haiku не уверен (<70%) и ещё не Sonnet — пересылаем Sonnet
+        # Гибрид: если Haiku не уверен (<70%) — пересылаем Sonnet
         if not use_sonnet and result.get("confidence", 0) < 70:
-            logger.info("Haiku не уверен, переключаюсь на Sonnet")
+            logger.info("Haiku не уверен, переключаюсь на Sonnet для классификации")
             return analyze_with_claude(merchant, message, use_sonnet=True)
 
         return result
@@ -1232,9 +1228,50 @@ def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) 
             "should_escalate": True,
             "category": "General",
             "priority": "Normal",
-            "response_to_merchant": "Спасибо за обращение! Специалист свяжется с вами.",
-            "escalation_summary": f"Ошибка AI. Сообщение: {message}"
+            "escalation_summary": f"AI classification error. Message: {message[:200]}"
         }
+
+
+def respond_to_merchant(merchant: dict, session: dict, new_message: str) -> str:
+    """Настоящий многошаговый диалог — Haiku с историей разговора.
+
+    Передаёт в Claude полную историю: все сообщения мерчанта и все предыдущие
+    ответы бота. Claude отвечает как живой сотрудник поддержки, а не JSON-машина.
+    Если Haiku не справляется — escalates to Sonnet.
+    """
+    system = MERCHANT_CHAT_SYSTEM.format(
+        name=merchant.get("name", ""),
+        mid=merchant.get("mid", ""),
+        business_type=merchant.get("business_type", "Ресторан"),
+    )
+
+    # Строим полноценную историю разговора для Claude
+    past_msgs    = session.get("messages", [])[:-1]   # все кроме текущего
+    past_replies = session.get("ai_responses", [])
+
+    messages = []
+    for i, user_msg in enumerate(past_msgs):
+        messages.append({"role": "user", "content": user_msg})
+        if i < len(past_replies):
+            messages.append({"role": "assistant", "content": past_replies[i]})
+    messages.append({"role": "user", "content": new_message})
+
+    for model in ("claude-haiku-4-5-20251001", "claude-sonnet-4-6"):
+        try:
+            resp = anthropic_client.messages.create(
+                model=model,
+                max_tokens=1200,   # достаточно для развёрнутого пошагового ответа
+                system=system,
+                messages=messages,
+            )
+            reply = resp.content[0].text.strip()
+            if reply:
+                stats["haiku_calls" if "haiku" in model else "sonnet_calls"] += 1
+                return reply
+        except Exception as e:
+            logger.error(f"respond_to_merchant {model} error: {e}")
+
+    return "Понял ваш вопрос. Позвольте передать его специалисту для точного ответа."
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1572,18 +1609,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(clover_resp)
             return
 
-    # AI анализирует сразу
+    # ── Шаг 1: быстрая классификация (Haiku, только JSON) ──────────────────
     await update.message.reply_text("⏳ Анализирую...")
     analysis = analyze_with_claude(merchant, full_message)
     confidence = analysis.get("confidence", 0)
     should_escalate = analysis.get("should_escalate", False)
 
     if confidence >= 85 and not should_escalate:
-        # AI уверен — отвечает сам
+        # ── Шаг 2: генерируем живой ответ с историей диалога ────────────────
+        # Отдельный вызов Claude с полной conversational историей → качественный ответ
+        ai_reply = respond_to_merchant(merchant, session, message_text)
+
         stats["ai_direct_answers"] += 1
         session["mode"] = "self_help"
         session["last_analysis"] = analysis
-        await update.message.reply_text(analysis["response_to_merchant"])
+        session["ai_responses"].append(ai_reply)   # сохраняем для следующего хода
+
+        await update.message.reply_text(ai_reply)
         await update.message.reply_text(
             "💡 Помогло? Если нет — напишите *саппорт* и создадим заявку.",
             parse_mode="Markdown"
