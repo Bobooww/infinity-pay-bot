@@ -342,7 +342,11 @@ SPAM_WINDOW = 60
 addmerchant_state = {}  # {tg_id: {"step": "name"|"mid"|"phone", "name": str, ...}}
 
 # Persistence
-STATE_FILE = Path("data/state.json")
+# Persistence path. Railway volume mounted at /data — используем его если есть.
+# Иначе падаем на локальную data/ (для разработки).
+_STATE_DIR = Path("/data") if Path("/data").exists() and os.access("/data", os.W_OK) else Path("data")
+STATE_FILE = _STATE_DIR / "state.json"
+# Если на /data уже есть state.json а в data/ старый — приоритет у volume
 
 # Clover
 CLOVER_BASE = os.environ.get("CLOVER_BASE_URL", "https://api.clover.com")
