@@ -1082,18 +1082,37 @@ async def _create_and_confirm_ticket(update: Update, session: dict, merchant: di
 # AI — ГИБРИД HAIKU/SONNET
 # ═══════════════════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT_TEMPLATE = """Ты классификатор обращений Infinity Pay Inc. — ISO в сфере платёжных услуг.
+SYSTEM_PROMPT_TEMPLATE = """Ты умный классификатор сообщений мерчантов Infinity Pay Inc. — ISO в сфере платёжных услуг.
 Процессор: Tekcard. POS: Clover.
 
 Мерчант: {name} | MID: {mid} | Бизнес: {business_type}
 
-ЗАДАЧА: ТОЛЬКО классифицировать сообщение. НЕ генерируй ответ мерчанту.
+ЗАДАЧА: ПОЛНОСТЬЮ понять сообщение и определить, что делать. НЕ генерируй ответ мерчанту здесь — только анализ и маршрутизация.
+
+КОНТЕКСТ РАЗГОВОРА:
+В сообщении пользователя первым блоком идёт КОНТЕКСТ (предыдущие сообщения, режим сессии, ждём ли телефон, память мерчанта), вторым — НОВОЕ СООБЩЕНИЕ. Это критично: одно и то же слово ("да", "нет", "ок") может значить разное в зависимости от контекста. Всегда учитывай этот контекст при классификации conversation_intent.
 
 ПРАВИЛА КЛАССИФИКАЦИИ:
-- Понимай уличный/разговорный стиль, сленг, опечатки, смешанный язык, кашу из мыслей.
+- Понимай уличный/разговорный стиль, сленг, опечатки, смешанный язык (RU/EN/TJ/UZ/ES), кашу из мыслей.
 - Уверенность (confidence): 0-100. Ставь >85 ТОЛЬКО если вопрос типичный и ответ однозначен.
-- ЭСКАЛИРУЙ (should_escalate=true) если: чарджбеки, закрытие аккаунта, ставки/rates, возвраты >$500, фрод/PCI, смена банковских реквизитов.
+- ЭСКАЛИРУЙ (should_escalate=true) если: чарджбеки, закрытие аккаунта, ставки/rates, возвраты >$500, фрод/PCI, смена банковских реквизитов, мерчант прямо просит человека/агента/саппорт, мерчант недоволен предыдущим ответом.
 - Подозрительная активность (>$7,000 в ресторане с обычным чеком $30-60) — should_escalate=true, priority="High".
+
+CONVERSATION_INTENT — определи намерение сообщения (учитывай контекст!):
+- "new_question"        — новый вопрос/проблема (не связан с предыдущим)
+- "followup"            — уточнение/продолжение по предыдущей теме
+- "escalation_request"  — мерчант хочет человека: "саппорт", "не помогло", "позовите агента", короткое "нет" после предложения помощи
+- "agree"               — подтверждает/соглашается: "да", "помогло", "спасибо", "ок", "yes"
+- "disagree"            — не согласен с советом: "не работает", "не так", "неправильно"
+- "greeting"            — здоровается: "привет", "hi", "салам"
+- "thanks"              — благодарит: "спасибо", "thanks", "рахмат"
+- "clover_action"       — хочет что-то сделать в Clover POS (продажи, заказ, меню — см. clover_intent)
+- "provide_phone"       — отправляет номер телефона (когда бот просил)
+- "skip_phone"          — хочет пропустить ввод телефона: "нет", "пропустить", "skip", "без номера"
+- "small_talk"          — обычное короткое сообщение без запроса: "ок", "ага", "понял"
+- "other"               — ничего из вышеперечисленного
+
+NEEDS_IMMEDIATE_HUMAN (true/false): мерчант прямо просит реального человека ПРЯМО СЕЙЧАС (не просто жалуется — именно требует агента). Используй для срочной маршрутизации.
 
 ОПРЕДЕЛЕНИЕ ПРИОРИТЕТА:
 🔴 Urgent: "срочно", "сейчас", "asap", "терминал умер", "не могу принимать", "горит", "fraud", "chargeback сегодня"
@@ -1103,13 +1122,21 @@ SYSTEM_PROMPT_TEMPLATE = """Ты классификатор обращений I
 
 Категории ТОЛЬКО из списка: Terminal, Payment, Chargeback, Statement, Billing, Account, Software, Hardware, Fraud, Compliance, General
 
+CLOVER_INTENT (если conversation_intent="clover_action"):
+- "sales_query"   — спрашивает про выручку/продажи/заказы за сегодня
+- "order_query"   — спрашивает про последний/конкретный заказ
+- "menu_change"   — хочет включить/выключить позицию меню (в clover_item — название)
+- null            — не относится к Clover
+
 ТИКЕТ ДЛЯ КОМАНДЫ (если should_escalate=true):
 - "ticket_title" — CLEAN English title, max 70 chars, суть проблемы без воды
 - "ticket_description" — DETAILED English description для support team (3-5 предложений): что нужно, контекст, конкретные действия
 - "escalation_summary" — 1 строка на английском
 
-JSON ответ (строго, только это):
-{{"confidence":0-100,"should_escalate":true/false,"category":"<из списка>","priority":"Urgent|High|Normal|Low","ticket_title":"English title","ticket_description":"English description","escalation_summary":"1-line English summary","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":""}}"""
+REASONING: 1 фраза почему ты так решил (для дебага)
+
+JSON ответ (строго, только это, без markdown):
+{{"confidence":0-100,"should_escalate":true/false,"needs_immediate_human":true/false,"conversation_intent":"<один из списка>","category":"<из списка>","priority":"Urgent|High|Normal|Low","ticket_title":"English title","ticket_description":"English description","escalation_summary":"1-line English summary","clover_intent":null|"sales_query"|"order_query"|"menu_change","clover_item":"","reasoning":"brief why"}}"""
 
 
 # ─── Системный промпт для разговорного AI (отдельно от классификации) ────────
@@ -1233,8 +1260,19 @@ def toggle_clover_item(merchant, item_name, enable):
         return None
 
 
-def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) -> dict:
-    """Гибрид Haiku→Sonnet: ТОЛЬКО классификация (JSON), без ответа мерчанту."""
+def analyze_with_claude(
+    merchant: dict,
+    message: str,
+    use_sonnet: bool = False,
+    session: dict | None = None,
+    mem: dict | None = None,
+) -> dict:
+    """Гибрид Haiku→Sonnet: умная классификация + conversation_intent.
+
+    Теперь подаёт Claude контекст сессии (предыдущие сообщения, режим, последний анализ)
+    и долгосрочную память — чтобы одно и то же слово ("нет", "да", "помогло")
+    понималось в зависимости от ситуации. Это заменяет примитивный keyword-matching.
+    """
     model = "claude-sonnet-4-6" if use_sonnet else "claude-haiku-4-5-20251001"
     model_label = "sonnet" if use_sonnet else "haiku"
 
@@ -1244,12 +1282,48 @@ def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) 
         business_type=merchant.get("business_type", "Ресторан"),
     )
 
+    # ── Собираем контекст для умной маршрутизации ─────────────────────────
+    ctx_lines: list[str] = []
+    if session:
+        mode = session.get("mode")
+        if mode:
+            ctx_lines.append(f"Текущий режим сессии: {mode}")
+        if session.get("awaiting_phone"):
+            ctx_lines.append("Бот ПРОСИТ мерчанта ввести телефон (ожидаем номер или skip).")
+        if session.get("ticket_id"):
+            ctx_lines.append(f"У мерчанта уже открыт тикет {session.get('ticket_id')[:8]} — сообщение скорее всего followup.")
+        past_msgs = session.get("messages", [])[-5:-1]  # до 4 предыдущих сообщений
+        past_replies = session.get("ai_responses", [])[-3:]
+        if past_msgs:
+            ctx_lines.append("Последние сообщения мерчанта в этой сессии:")
+            for i, m in enumerate(past_msgs, 1):
+                ctx_lines.append(f"  [{i}] {m[:200]}")
+        if past_replies:
+            ctx_lines.append("Последние ответы бота:")
+            for i, r in enumerate(past_replies, 1):
+                ctx_lines.append(f"  [{i}] {r[:200]}")
+        last_analysis = session.get("last_analysis")
+        if last_analysis:
+            ctx_lines.append(
+                f"Предыдущий анализ: категория={last_analysis.get('category','')}, "
+                f"intent={last_analysis.get('conversation_intent','')}, "
+                f"escalation={last_analysis.get('should_escalate', False)}"
+            )
+    if mem and mem.get("summary"):
+        ctx_lines.append(f"Долгая история мерчанта: {mem['summary'][:400]}")
+    if mem and mem.get("recurring_categories"):
+        top = sorted(mem["recurring_categories"].items(), key=lambda x: -x[1])[:3]
+        ctx_lines.append("Частые категории: " + ", ".join(f"{c}×{n}" for c, n in top))
+
+    context_block = "\n".join(ctx_lines) if ctx_lines else "Контекста нет — первое сообщение мерчанта."
+    user_content = f"КОНТЕКСТ:\n{context_block}\n\nНОВОЕ СООБЩЕНИЕ МЕРЧАНТА:\n{message}"
+
     try:
         response = anthropic_client.messages.create(
             model=model,
-            max_tokens=400,   # только JSON — не нужно много токенов
+            max_tokens=600,   # чуть больше — нужно место под reasoning и intent
             system=system_prompt,
-            messages=[{"role": "user", "content": message}]
+            messages=[{"role": "user", "content": user_content}]
         )
         text = response.content[0].text.strip()
 
@@ -1258,25 +1332,40 @@ def analyze_with_claude(merchant: dict, message: str, use_sonnet: bool = False) 
         if result.get("category") not in VALID_CATEGORIES:
             result["category"] = "General"
 
+        # Гарантируем наличие ключей
+        result.setdefault("conversation_intent", "other")
+        result.setdefault("needs_immediate_human", False)
+        result.setdefault("reasoning", "")
+
         stats[f"{model_label}_calls"] += 1
 
         # Гибрид: если Haiku не уверен (<70%) — пересылаем Sonnet
         if not use_sonnet and result.get("confidence", 0) < 70:
-            logger.info("Haiku не уверен, переключаюсь на Sonnet для классификации")
-            return analyze_with_claude(merchant, message, use_sonnet=True)
+            logger.info(f"Haiku не уверен ({result.get('confidence')}%), переключаюсь на Sonnet")
+            return analyze_with_claude(merchant, message, use_sonnet=True, session=session, mem=mem)
 
+        logger.info(
+            f"AI intent={result.get('conversation_intent')} "
+            f"category={result.get('category')} "
+            f"confidence={result.get('confidence')} "
+            f"escalate={result.get('should_escalate')} "
+            f"reasoning={result.get('reasoning','')[:80]}"
+        )
         return result
 
     except (json.JSONDecodeError, Exception) as e:
         logger.error(f"Ошибка {model}: {e}")
         if not use_sonnet:
-            return analyze_with_claude(merchant, message, use_sonnet=True)
+            return analyze_with_claude(merchant, message, use_sonnet=True, session=session, mem=mem)
         return {
             "confidence": 0,
             "should_escalate": True,
+            "needs_immediate_human": False,
+            "conversation_intent": "new_question",
             "category": "General",
             "priority": "Normal",
-            "escalation_summary": f"AI classification error. Message: {message[:200]}"
+            "escalation_summary": f"AI classification error. Message: {message[:200]}",
+            "reasoning": "fallback after API error",
         }
 
 
@@ -1759,126 +1848,206 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Сессия: проверяем есть ли активная ───────────────────────────────
     session = get_session(tg_id)
 
-    # Если есть активный тикет — добавляем комментарий
+    # ── УМНЫЙ АНАЛИЗ: Claude понимает КАЖДОЕ сообщение в контексте ────────
+    # Это ЗАМЕНЯЕТ все keyword-матчинги ниже. Haiku получает:
+    #   • текст сообщения
+    #   • режим сессии, ждём ли телефон, есть ли активный тикет
+    #   • последние сообщения и ответы
+    #   • долгосрочную память мерчанта
+    # И возвращает осмысленный conversation_intent + classification.
+    # Показываем "typing..." пока Claude думает — UX приятнее чем текст "анализирую".
+    try:
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    except Exception:
+        pass
+    mem_for_ctx = merchant_memory.get(tg_id)
+    analysis = analyze_with_claude(merchant, message_text, session=session, mem=mem_for_ctx)
+    intent = analysis.get("conversation_intent", "other")
+    confidence = analysis.get("confidence", 0)
+    should_escalate = analysis.get("should_escalate", False) or analysis.get("needs_immediate_human", False)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ВЕТКА A: активный тикет — не закрываем и не блокируем канал, умно отвечаем
+    # ─────────────────────────────────────────────────────────────────────
     if session.get("ticket_id"):
         session["messages"].append(message_text)
         add_comment_to_ticket(session["ticket_id"], f"[Мерчант] {message_text}")
-        await update.message.reply_text(
-            "📝 Сообщение добавлено к вашему обращению. Ожидайте ответа."
-        )
-        return
+        # Даже с активным тикетом — Claude генерирует человеческий ответ.
+        # Мерчант получает мгновенный умный отклик вместо "ждите" робота.
+        session["last_analysis"] = analysis
+        try:
+            ai_reply = respond_to_merchant(merchant, session, message_text, tg_id=tg_id)
+        except Exception as e:
+            logger.error(f"respond in active ticket: {e}")
+            ai_reply = None
 
-    # ── Ожидаем телефон для создания тикета ────────────────────────────
-    if session.get("awaiting_phone"):
-        session["awaiting_phone"] = False
-        phone = message_text.strip()
-        if phone.lower() in ("пропустить", "skip", "нет", "no", "-", "0"):
-            phone = None
+        if ai_reply:
+            session["ai_responses"].append(ai_reply)
+            record_merchant_exchange(
+                tg_id=tg_id, merchant=merchant,
+                user_message=message_text, ai_reply=ai_reply,
+                category=analysis.get("category", ""),
+                ticket_id=session.get("ticket_id"),
+            )
+            await update.message.reply_text(ai_reply)
         else:
-            session["phone_number"] = phone
-        await _create_and_confirm_ticket(update, session, merchant, phone)
+            await update.message.reply_text(
+                "📝 Понял, добавил к вашему обращению. Команда скоро ответит."
+            )
         return
 
-    # ── Если AI уже ответил — проверяем, хочет ли мерчант саппорт ──────
-    if session.get("mode") == "self_help":
-        msg_lower = message_text.lower().strip()
-
-        # Короткие "нет/no" — сразу эскалация (ответ на "помогло?")
-        short_no = {"нет", "no", "не", "неа", "nope", "ne", "yox", "nein"}
-        is_short_no = msg_lower in short_no
-
-        # Фразы-триггеры эскалации (частичное совпадение)
-        escalation_phrases = (
-            "саппорт", "support", "заявка", "не помог", "не помогло", "не помогает",
-            "не работает", "всё равно", "все равно", "не понял", "не понятно",
-            "создай заявку", "нужен человек", "отдай саппорт", "отдай специалист",
-            "позови человека", "не получилось", "не получается", "не то",
-            "неправильно", "свяжитесь", "позвоните",
-        )
-        is_phrase = any(t in msg_lower for t in escalation_phrases) or msg_lower == "2"
-
-        if is_short_no or is_phrase:
-            session["mode"] = "support"
-            session["awaiting_phone"] = True
-            # ВАЖНО: добавляем это сообщение в сессию — оно содержит контекст эскалации
-            session["messages"].append(message_text)
-            # Сбрасываем старый анализ — _create_and_confirm_ticket сделает свежий
-            session["last_analysis"] = None
-            session["pending_analysis"] = None
+    # ─────────────────────────────────────────────────────────────────────
+    # ВЕТКА B: ждём телефон для создания тикета — Claude парсит intent
+    # ─────────────────────────────────────────────────────────────────────
+    if session.get("awaiting_phone"):
+        # Claude уже определил намерение: provide_phone / skip_phone / что-то ещё
+        if intent == "skip_phone":
+            session["awaiting_phone"] = False
+            await _create_and_confirm_ticket(update, session, merchant, phone=None)
+            return
+        if intent == "provide_phone":
+            # Вытащим цифры — простая санитизация
+            import re as _re
+            digits = _re.sub(r"\D", "", message_text)
+            if 7 <= len(digits) <= 15:
+                session["awaiting_phone"] = False
+                session["phone_number"] = message_text.strip()
+                await _create_and_confirm_ticket(update, session, merchant, phone=message_text.strip())
+                return
+            # не похоже на телефон — просим уточнить
             await update.message.reply_text(
-                "📞 Хорошо, создам заявку для специалиста!\n\n"
-                "Укажите телефон для связи или напишите *пропустить*:",
+                "🤔 Не похоже на номер. Пришлите в формате *+13471234567* или напишите *пропустить*.",
                 parse_mode="Markdown"
             )
             return
-        # Новый вопрос — сбрасываем режим, анализируем заново
-        session["mode"] = None
-        session["messages"] = []
-        session["last_analysis"] = None
-
-    # ── Мерчант пишет сообщение — AI сразу анализирует ──────────────────
-    session["messages"].append(message_text)
-    full_message = "\n".join(session["messages"])
-
-    # Clover intent check
-    if merchant.get("clover_merchant_id") and merchant.get("clover_access_token"):
-        msg_lower = message_text.lower()
-        sales_kw = ["sales", "revenue", "today", "продажи", "выручка", "заказы сегодня"]
-        order_kw = ["last order", "latest order", "последний заказ"]
-        toggle_kw = ["disable", "enable", "turn off", "turn on", "выключи", "включи", "убрать из меню", "добавить в меню"]
-        clover_resp = None
-        if any(kw in msg_lower for kw in sales_kw):
-            clover_resp = get_clover_sales_today(merchant)
-        elif any(kw in msg_lower for kw in order_kw):
-            clover_resp = get_clover_last_order(merchant)
-        elif any(kw in msg_lower for kw in toggle_kw):
-            enable = any(kw in msg_lower for kw in ["включи", "enable", "turn on", "добавить"])
-            clover_resp = toggle_clover_item(merchant, message_text, enable)
-        if clover_resp:
-            await update.message.reply_text(clover_resp)
+        # Мерчант написал что-то ещё — возможно уточняет проблему или передумал
+        if intent == "escalation_request":
+            # Уже и так ждём телефон — напомним
+            await update.message.reply_text(
+                "📞 Напишите телефон для связи или *пропустить* — создам заявку.",
+                parse_mode="Markdown"
+            )
             return
-
-    # ── Шаг 1: быстрая классификация (Haiku, только JSON) ──────────────────
-    await update.message.reply_text("⏳ Анализирую...")
-    analysis = analyze_with_claude(merchant, full_message)
-    confidence = analysis.get("confidence", 0)
-    should_escalate = analysis.get("should_escalate", False)
-
-    if confidence >= 85 and not should_escalate:
-        # ── Шаг 2: генерируем живой ответ с историей диалога ────────────────
-        # Отдельный вызов Claude с полной conversational историей → качественный ответ
-        # tg_id подтягивает долгосрочную память мерчанта (30 дней)
-        ai_reply = respond_to_merchant(merchant, session, message_text, tg_id=tg_id)
-
-        stats["ai_direct_answers"] += 1
-        session["mode"] = "self_help"
-        session["last_analysis"] = analysis
-        session["ai_responses"].append(ai_reply)   # сохраняем для следующего хода
-
-        # Сохраняем в долгосрочную память
-        record_merchant_exchange(
-            tg_id=tg_id,
-            merchant=merchant,
-            user_message=message_text,
-            ai_reply=ai_reply,
-            category=analysis.get("category", ""),
-            ticket_id=None,
-        )
-
-        await update.message.reply_text(ai_reply)
+        # Новый вопрос / уточнение — продолжим собирать информацию
+        session["messages"].append(message_text)
         await update.message.reply_text(
-            "💡 Помогло? Если нет — напишите *саппорт* и создадим заявку.",
+            "📝 Записал. Пришлите *телефон* или *пропустить* — команда свяжется.",
             parse_mode="Markdown"
         )
-    else:
-        # Нужен саппорт — спрашиваем телефон и создаём тикет
+        return
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ВЕТКА C: self_help режим — Claude сам понимает "работает / не работает / спасибо"
+    # ─────────────────────────────────────────────────────────────────────
+    if session.get("mode") == "self_help":
+        if intent in ("escalation_request", "disagree") or should_escalate:
+            # Мерчант недоволен или прямо просит человека → эскалация
+            session["mode"] = "support"
+            session["awaiting_phone"] = True
+            session["messages"].append(message_text)
+            session["last_analysis"] = None
+            session["pending_analysis"] = analysis
+            await update.message.reply_text(
+                "📞 Понял, передаю специалисту! Укажите *телефон* для связи или напишите *пропустить*:",
+                parse_mode="Markdown"
+            )
+            return
+        if intent in ("agree", "thanks"):
+            # "Помогло / спасибо" — закрываем вежливо, записываем в память
+            friendly = respond_to_merchant(merchant, session, message_text, tg_id=tg_id)
+            session["ai_responses"].append(friendly)
+            record_merchant_exchange(
+                tg_id=tg_id, merchant=merchant,
+                user_message=message_text, ai_reply=friendly,
+                category=analysis.get("category", ""),
+                ticket_id=None,
+            )
+            await update.message.reply_text(friendly)
+            # мягко сбрасываем режим — следующий вопрос пойдёт с нуля
+            session["mode"] = None
+            session["messages"] = []
+            session["ai_responses"] = []
+            return
+        # Новый вопрос / followup — продолжаем разговор в self_help
+        # (не сбрасываем messages, чтобы respond_to_merchant видел контекст)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ВЕТКА D: Clover action — AI уже извлёк intent + item
+    # ─────────────────────────────────────────────────────────────────────
+    if intent == "clover_action" and merchant.get("clover_merchant_id") and merchant.get("clover_access_token"):
+        clover_intent = analysis.get("clover_intent")
+        clover_item = analysis.get("clover_item", "") or message_text
+        clover_resp = None
+        if clover_intent == "sales_query":
+            clover_resp = get_clover_sales_today(merchant)
+        elif clover_intent == "order_query":
+            clover_resp = get_clover_last_order(merchant)
+        elif clover_intent == "menu_change":
+            # Решаем включить или выключить на основе reasoning
+            msg_low = message_text.lower()
+            enable = any(k in msg_low for k in ["включи", "enable", "turn on", "добавить", "вклю"])
+            clover_resp = toggle_clover_item(merchant, clover_item, enable)
+        if clover_resp:
+            session["messages"].append(message_text)
+            session["ai_responses"].append(clover_resp)
+            record_merchant_exchange(
+                tg_id=tg_id, merchant=merchant,
+                user_message=message_text, ai_reply=clover_resp,
+                category="Software", ticket_id=None,
+            )
+            await update.message.reply_text(clover_resp)
+            return
+        # Clover не ответил — провалимся в обычный AI-ответ
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ВЕТКА E: нужен саппорт — собираем телефон и создаём тикет
+    # ─────────────────────────────────────────────────────────────────────
+    # Эскалируем если:
+    #   • Claude явно сказал should_escalate (чарджбек, фрод, закрытие и т.д.)
+    #   • Мерчант прямо просит человека (needs_immediate_human)
+    #   • Claude не уверен (<85%) и это реальный запрос (не приветствие/спасибо)
+    _SAFE_INTENTS = {"greeting", "thanks", "agree", "small_talk"}
+    if should_escalate or (confidence < 85 and intent not in _SAFE_INTENTS):
         stats["escalations"] += 1
+        session["messages"].append(message_text)
         session["mode"] = "support"
         session["awaiting_phone"] = True
         session["pending_analysis"] = analysis
+        # Короткий AI-ответ для прогрева — чтобы мерчант понимал что его услышали
+        try:
+            ack = respond_to_merchant(merchant, session, message_text, tg_id=tg_id)
+            if ack:
+                await update.message.reply_text(ack)
+        except Exception as e:
+            logger.error(f"escalation ack: {e}")
         await update.message.reply_text(
-            "📞 Понял! Создаю заявку для команды.\n\n"
-            "Укажите телефон для связи или напишите *пропустить*:",
+            "📞 Передаю специалисту. Напишите *телефон* или *пропустить*:",
+            parse_mode="Markdown"
+        )
+        return
+
+    # ─────────────────────────────────────────────────────────────────────
+    # ВЕТКА F: AI сам отвечает (confidence >= 85 без эскалации)
+    # ─────────────────────────────────────────────────────────────────────
+    session["messages"].append(message_text)
+    ai_reply = respond_to_merchant(merchant, session, message_text, tg_id=tg_id)
+
+    stats["ai_direct_answers"] += 1
+    session["mode"] = "self_help"
+    session["last_analysis"] = analysis
+    session["ai_responses"].append(ai_reply)
+
+    record_merchant_exchange(
+        tg_id=tg_id, merchant=merchant,
+        user_message=message_text, ai_reply=ai_reply,
+        category=analysis.get("category", ""), ticket_id=None,
+    )
+
+    await update.message.reply_text(ai_reply)
+    # Для greeting/small_talk/thanks не спрашиваем "помогло" — это мешает
+    if intent in ("new_question", "followup"):
+        await update.message.reply_text(
+            "💡 Помогло? Если нет — напишите *саппорт* и передам специалисту.",
             parse_mode="Markdown"
         )
 
