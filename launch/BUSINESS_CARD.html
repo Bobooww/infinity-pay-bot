@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Infinity Pay — Business Card (print)</title>
+<style>
+  /* Print: US business card 3.5" × 2" = 89mm × 51mm */
+  @page { size: 89mm 51mm; margin: 0; }
+  body {
+    margin: 0;
+    font-family: 'SF Pro Display', -apple-system, 'Segoe UI', sans-serif;
+    background: #f3f4f6;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    padding: 40px;
+  }
+  .card {
+    width: 89mm;
+    height: 51mm;
+    border-radius: 4mm;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    background: white;
+    page-break-after: always;
+  }
+  /* ───── Front side ───── */
+  .front {
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 60%, #2563eb 100%);
+    color: white;
+    padding: 6mm 7mm;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .front::before {
+    content: '∞';
+    position: absolute;
+    top: -8mm;
+    right: -4mm;
+    font-size: 70mm;
+    color: rgba(255,255,255,0.06);
+    font-weight: 900;
+    line-height: 1;
+    pointer-events: none;
+  }
+  .logo-row {
+    display: flex;
+    align-items: center;
+    gap: 3mm;
+    z-index: 1;
+  }
+  .logo-mark {
+    width: 9mm;
+    height: 9mm;
+    border-radius: 2mm;
+    background: linear-gradient(135deg, #60a5fa, #3b82f6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 5mm;
+    font-weight: 900;
+    color: #0f172a;
+    box-shadow: 0 2px 6px rgba(59,130,246,0.4);
+  }
+  .brand-name {
+    font-size: 5mm;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  .brand-tag {
+    font-size: 2mm;
+    font-weight: 500;
+    color: #93c5fd;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-top: 0.5mm;
+  }
+  .name-block {
+    z-index: 1;
+  }
+  .agent-name {
+    font-size: 5mm;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1.1;
+  }
+  .agent-title {
+    font-size: 2.5mm;
+    font-weight: 500;
+    color: #93c5fd;
+    margin-top: 1mm;
+    letter-spacing: 0.05em;
+  }
+  .accent-line {
+    height: 0.5mm;
+    width: 12mm;
+    background: linear-gradient(90deg, #60a5fa, transparent);
+    margin-top: 2mm;
+  }
+  /* ───── Back side ───── */
+  .back {
+    background: white;
+    padding: 6mm 7mm;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .back::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 1mm;
+    background: linear-gradient(90deg, #2563eb, #60a5fa, #2563eb);
+  }
+  .contact-row {
+    display: flex;
+    align-items: center;
+    gap: 2mm;
+    font-size: 2.8mm;
+    color: #1f2937;
+    margin-bottom: 1.5mm;
+  }
+  .contact-row .icon {
+    width: 4mm;
+    height: 4mm;
+    border-radius: 1mm;
+    background: #eff6ff;
+    color: #2563eb;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2.2mm;
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .contact-row strong {
+    font-weight: 600;
+    color: #0f172a;
+  }
+  .footer {
+    font-size: 2mm;
+    color: #6b7280;
+    text-align: center;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-top: 2mm;
+  }
+  .qr-placeholder {
+    position: absolute;
+    bottom: 6mm;
+    right: 6mm;
+    width: 14mm;
+    height: 14mm;
+    background: repeating-linear-gradient(
+      0deg,
+      #0f172a 0px, #0f172a 1px,
+      transparent 1px, transparent 2px
+    ),
+    repeating-linear-gradient(
+      90deg,
+      #0f172a 0px, #0f172a 1px,
+      transparent 1px, transparent 2px
+    );
+    background-color: white;
+    border: 0.4mm solid #0f172a;
+    border-radius: 1mm;
+  }
+  .qr-label {
+    position: absolute;
+    bottom: 2mm;
+    right: 6mm;
+    font-size: 1.6mm;
+    color: #6b7280;
+    text-align: center;
+    width: 14mm;
+  }
+  .preview-label {
+    color: #6b7280;
+    font-size: 12px;
+    margin-bottom: -16px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  @media print {
+    body { background: white; padding: 0; gap: 0; }
+    .preview-label { display: none; }
+    .card { box-shadow: none; margin: 0; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ───── ANDREW OGANISYAN ───── -->
+<div class="preview-label">Andrew Oganisyan — Front</div>
+<div class="card front">
+  <div class="logo-row">
+    <div class="logo-mark">IP</div>
+    <div>
+      <div class="brand-name">Infinity Pay</div>
+      <div class="brand-tag">Payment Processing · ISO</div>
+    </div>
+  </div>
+  <div class="name-block">
+    <div class="agent-name">Andrew Oganisyan</div>
+    <div class="agent-title">Sales Agent · Ohio / Cleveland</div>
+    <div class="accent-line"></div>
+  </div>
+</div>
+
+<div class="preview-label">Andrew Oganisyan — Back</div>
+<div class="card back">
+  <div>
+    <div class="contact-row"><div class="icon">✉</div><strong>andrew@infinitypay.us</strong></div>
+    <div class="contact-row"><div class="icon">☎</div><strong>+1 (216) 555-0142</strong></div>
+    <div class="contact-row"><div class="icon">@</div><strong>@andrewoganisyan</strong> · Telegram</div>
+    <div class="contact-row"><div class="icon">⌂</div><strong>infinitypay.us</strong></div>
+  </div>
+  <div class="qr-placeholder"></div>
+  <div class="qr-label">scan to chat</div>
+  <div class="footer" style="text-align: left; margin-top: 0;">Lower rates · Free Clover · 24/7 support</div>
+</div>
+
+<!-- ───── NICK (Florida) ───── -->
+<div class="preview-label">Nick — Front</div>
+<div class="card front">
+  <div class="logo-row">
+    <div class="logo-mark">IP</div>
+    <div>
+      <div class="brand-name">Infinity Pay</div>
+      <div class="brand-tag">Payment Processing · ISO</div>
+    </div>
+  </div>
+  <div class="name-block">
+    <div class="agent-name">Nick Kovalenko</div>
+    <div class="agent-title">Sales Agent · Florida</div>
+    <div class="accent-line"></div>
+  </div>
+</div>
+
+<div class="preview-label">Nick — Back</div>
+<div class="card back">
+  <div>
+    <div class="contact-row"><div class="icon">✉</div><strong>mk.services.llc.fl@gmail.com</strong></div>
+    <div class="contact-row"><div class="icon">☎</div><strong>+1 (305) 555-7683</strong></div>
+    <div class="contact-row"><div class="icon">@</div><strong>@Nick7683</strong> · Telegram</div>
+    <div class="contact-row"><div class="icon">⌂</div><strong>infinitypay.us</strong></div>
+  </div>
+  <div class="qr-placeholder"></div>
+  <div class="qr-label">scan to chat</div>
+  <div class="footer" style="text-align: left; margin-top: 0;">Lower rates · Free Clover · 24/7 support</div>
+</div>
+
+<!-- ───── TEMPLATE for new agents ───── -->
+<div class="preview-label">⬇ Template (заменить имя/телефон/email/город) — Front</div>
+<div class="card front">
+  <div class="logo-row">
+    <div class="logo-mark">IP</div>
+    <div>
+      <div class="brand-name">Infinity Pay</div>
+      <div class="brand-tag">Payment Processing · ISO</div>
+    </div>
+  </div>
+  <div class="name-block">
+    <div class="agent-name">[AGENT NAME]</div>
+    <div class="agent-title">Sales Agent · [CITY]</div>
+    <div class="accent-line"></div>
+  </div>
+</div>
+
+<div class="preview-label">Template — Back</div>
+<div class="card back">
+  <div>
+    <div class="contact-row"><div class="icon">✉</div><strong>[email]@infinitypay.us</strong></div>
+    <div class="contact-row"><div class="icon">☎</div><strong>+1 (XXX) XXX-XXXX</strong></div>
+    <div class="contact-row"><div class="icon">@</div><strong>@telegram</strong> · Telegram</div>
+    <div class="contact-row"><div class="icon">⌂</div><strong>infinitypay.us</strong></div>
+  </div>
+  <div class="qr-placeholder"></div>
+  <div class="qr-label">scan to chat</div>
+  <div class="footer" style="text-align: left; margin-top: 0;">Lower rates · Free Clover · 24/7 support</div>
+</div>
+
+<!-- Print instruction (hidden from print) -->
+<div style="margin-top: 30px; padding: 20px; background: white; border-radius: 8px; max-width: 600px; font-size: 14px; color: #1f2937;">
+  <h2 style="margin-top: 0; font-size: 18px;">📐 Печать</h2>
+  <ul style="line-height: 1.7;">
+    <li><strong>Размер:</strong> US standard 3.5" × 2" (89mm × 51mm)</li>
+    <li><strong>Бумага:</strong> 350gsm matte или soft-touch (premium feel)</li>
+    <li><strong>Двусторонняя:</strong> синий лицо + белая обратка</li>
+    <li><strong>QR-код:</strong> заменить плейсхолдер на реальный QR — например ссылку на <code>https://t.me/InfinityPaySupportBot</code> или личный <code>https://t.me/posshams</code></li>
+    <li><strong>Тираж:</strong> 250 шт на агента — ~$25-40 на VistaPrint / Moo / Local Print Shop</li>
+  </ul>
+  <p><strong>Открой этот файл в Chrome → Cmd+P → Save as PDF → отправь в типографию.</strong></p>
+  <p>Если хочешь другой стиль (минимализм / matte black / золотое тиснение) — скажи, сделаю варианты.</p>
+</div>
+
+</body>
+</html>

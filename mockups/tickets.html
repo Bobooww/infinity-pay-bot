@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Тикеты · Infinity Pay Desk</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+  body { font-family: 'Inter', -apple-system, sans-serif; }
+  .sidebar-link.active { background: #EFF6FF; color: #2563EB; border-left: 3px solid #2563EB; padding-left: 13px; }
+  .kanban-col { min-height: 500px; }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+
+<div class="flex min-h-screen">
+
+  <!-- Sidebar -->
+  <aside class="w-60 bg-white border-r border-gray-200 flex flex-col">
+    <div class="h-14 px-5 flex items-center gap-2 border-b border-gray-200">
+      <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">IP</div>
+      <div>
+        <div class="text-sm font-semibold leading-tight">Infinity Desk</div>
+        <div class="text-[10px] text-gray-500 leading-tight">Infinity Pay Inc.</div>
+      </div>
+    </div>
+    <nav class="flex-1 py-4 text-sm">
+      <a href="index.html" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50"><i data-lucide="layout-dashboard" class="w-4 h-4"></i>Дашборд</a>
+      <a href="tickets.html" class="sidebar-link active flex items-center gap-3 px-4 py-2 text-gray-600"><i data-lucide="ticket" class="w-4 h-4"></i>Тикеты<span class="ml-auto bg-red-100 text-red-600 text-[10px] px-1.5 py-0.5 rounded-full font-semibold">23</span></a>
+      <a href="merchants.html" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50"><i data-lucide="store" class="w-4 h-4"></i>Мерчанты<span class="ml-auto text-[10px] text-gray-400">152</span></a>
+      <a href="reports.html" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50"><i data-lucide="bar-chart-3" class="w-4 h-4"></i>Отчёты</a>
+      <a href="#" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50"><i data-lucide="users" class="w-4 h-4"></i>Агенты</a>
+      <a href="#" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50"><i data-lucide="settings" class="w-4 h-4"></i>Настройки</a>
+    </nav>
+    <div class="p-4 border-t border-gray-200 flex items-center gap-2">
+      <div class="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 text-white flex items-center justify-center text-xs font-semibold">SR</div>
+      <div class="flex-1"><div class="text-sm font-medium">Shams Rozikov</div><div class="text-[10px] text-gray-500">ISO Admin</div></div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="flex-1 flex flex-col min-w-0">
+    <header class="h-14 bg-white border-b border-gray-200 px-6 flex items-center gap-4">
+      <div class="flex-1 max-w-md relative">
+        <i data-lucide="search" class="w-4 h-4 text-gray-400 absolute left-3 top-2.5"></i>
+        <input type="text" placeholder="Поиск тикета, мерчанта..." class="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-md bg-gray-50 focus:outline-none focus:border-blue-500">
+      </div>
+      <button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center gap-1.5"><i data-lucide="plus" class="w-4 h-4"></i>Создать тикет</button>
+    </header>
+
+    <div class="flex-1 p-6 overflow-auto">
+      <!-- Toolbar -->
+      <div class="flex items-center justify-between mb-5">
+        <div>
+          <h1 class="text-2xl font-bold">Тикеты</h1>
+          <p class="text-sm text-gray-500 mt-1">23 открытых · 4 ожидают мерчанта · 17 закрытых сегодня</p>
+        </div>
+        <div class="flex items-center gap-2 bg-white border border-gray-200 rounded-md p-0.5">
+          <button class="px-3 py-1 text-sm rounded bg-blue-600 text-white font-medium">Канбан</button>
+          <button class="px-3 py-1 text-sm rounded text-gray-600 hover:bg-gray-50">Список</button>
+        </div>
+      </div>
+
+      <!-- Filters -->
+      <div class="bg-white border border-gray-200 rounded-md p-3 mb-5 flex items-center gap-2 flex-wrap">
+        <span class="text-xs font-semibold text-gray-500 mr-1">Фильтр:</span>
+        <button class="text-xs px-2.5 py-1 border border-gray-200 rounded hover:bg-gray-50 flex items-center gap-1">Приоритет <i data-lucide="chevron-down" class="w-3 h-3"></i></button>
+        <button class="text-xs px-2.5 py-1 border border-gray-200 rounded hover:bg-gray-50 flex items-center gap-1">Агент <i data-lucide="chevron-down" class="w-3 h-3"></i></button>
+        <button class="text-xs px-2.5 py-1 border border-gray-200 rounded hover:bg-gray-50 flex items-center gap-1">Категория <i data-lucide="chevron-down" class="w-3 h-3"></i></button>
+        <button class="text-xs px-2.5 py-1 border border-gray-200 rounded hover:bg-gray-50 flex items-center gap-1">Канал <i data-lucide="chevron-down" class="w-3 h-3"></i></button>
+        <button class="text-xs px-2.5 py-1 border border-gray-200 rounded hover:bg-gray-50 flex items-center gap-1">Период <i data-lucide="chevron-down" class="w-3 h-3"></i></button>
+        <div class="ml-auto flex items-center gap-2">
+          <button class="text-xs px-2 py-1 bg-red-50 text-red-700 rounded flex items-center gap-1">🔴 Urgent <span class="bg-red-200 text-red-800 px-1.5 rounded-full font-semibold">3</span></button>
+          <button class="text-xs px-2 py-1 bg-amber-50 text-amber-700 rounded flex items-center gap-1">🟠 High <span class="bg-amber-200 text-amber-800 px-1.5 rounded-full font-semibold">7</span></button>
+        </div>
+      </div>
+
+      <!-- Kanban board -->
+      <div class="grid grid-cols-4 gap-4">
+
+        <!-- Column: Open -->
+        <div class="bg-gray-100 rounded-lg p-3 kanban-col">
+          <div class="flex items-center justify-between mb-3 px-1">
+            <div class="flex items-center gap-2">
+              <div class="w-2 h-2 bg-blue-500 rounded-full"></div>
+              <span class="font-semibold text-sm">Открыт</span>
+              <span class="text-xs text-gray-500">8</span>
+            </div>
+            <button class="text-gray-400 hover:text-gray-600"><i data-lucide="plus" class="w-4 h-4"></i></button>
+          </div>
+
+          <a href="ticket.html" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-red-500 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-091</span>
+              <span class="text-xs">🔴</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Plov Point</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Терминал не работает, очередь клиентов, не могу принимать карты</div>
+            <div class="flex items-center justify-between mt-2 text-[10px] text-gray-500">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded">Hardware</span>
+              <span>38 мин</span>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-amber-500 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-090</span>
+              <span class="text-xs">🟠</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Mirzo Shashlik</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Не приходят деньги на счёт за вчера, нужен чек из банка</div>
+            <div class="flex items-center justify-between mt-2 text-[10px] text-gray-500">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded">Statement</span>
+              <span>1ч 12м</span>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-yellow-400 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-088</span>
+              <span class="text-xs">🟡</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Non Restaurant</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Как добавить новый пункт меню в Clover?</div>
+            <div class="flex items-center justify-between mt-2 text-[10px] text-gray-500">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded">Software</span>
+              <span>2ч 30м</span>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 border-l-4 border-yellow-400 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-086</span>
+              <span class="text-xs">🟡</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Chaikhana Navat</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Нужен отчёт за март, не могу скачать в dashboard</div>
+            <div class="flex items-center justify-between mt-2 text-[10px] text-gray-500">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded">Statement</span>
+              <span>3ч</span>
+            </div>
+          </a>
+        </div>
+
+        <!-- Column: In Progress -->
+        <div class="bg-gray-100 rounded-lg p-3 kanban-col">
+          <div class="flex items-center justify-between mb-3 px-1">
+            <div class="flex items-center gap-2">
+              <div class="w-2 h-2 bg-indigo-500 rounded-full"></div>
+              <span class="font-semibold text-sm">В работе</span>
+              <span class="text-xs text-gray-500">6</span>
+            </div>
+            <button class="text-gray-400 hover:text-gray-600"><i data-lucide="plus" class="w-4 h-4"></i></button>
+          </div>
+
+          <a href="#" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-red-500 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-079</span>
+              <span class="text-xs">🔴</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Samarkand Grill</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Chargeback $340 — срочно связаться с процессором</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">Chargeback</span>
+              <div class="flex items-center gap-1">
+                <div class="w-4 h-4 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 text-white text-[8px] font-semibold flex items-center justify-center">DP</div>
+              </div>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-red-500 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-067</span>
+              <span class="text-xs">🔴</span>
+            </div>
+            <div class="text-sm font-medium mb-1">KEBAB USA</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Подозрительная транзакция $8,200 — запросить инфо у мерчанта</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">Fraud</span>
+              <div class="flex items-center gap-1">
+                <div class="w-4 h-4 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 text-white text-[8px] font-semibold flex items-center justify-center">DP</div>
+              </div>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-amber-500 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-085</span>
+              <span class="text-xs">🟠</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Chaikhana Navat</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Выписка за март — готовлю pdf из банка</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">Statement</span>
+              <div class="w-4 h-4 rounded-full bg-gradient-to-br from-amber-500 to-orange-500 text-white text-[8px] font-semibold flex items-center justify-center">FR</div>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 border-l-4 border-yellow-400 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-082</span>
+              <span class="text-xs">🟡</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Tashkent Bakery</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Настройка принтера для кухни</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">Hardware</span>
+              <div class="w-4 h-4 rounded-full bg-gradient-to-br from-emerald-500 to-teal-500 text-white text-[8px] font-semibold flex items-center justify-center">AO</div>
+            </div>
+          </a>
+        </div>
+
+        <!-- Column: Waiting Merchant -->
+        <div class="bg-gray-100 rounded-lg p-3 kanban-col">
+          <div class="flex items-center justify-between mb-3 px-1">
+            <div class="flex items-center gap-2">
+              <div class="w-2 h-2 bg-amber-500 rounded-full"></div>
+              <span class="font-semibold text-sm">Ждём мерчанта</span>
+              <span class="text-xs text-gray-500">4</span>
+            </div>
+            <button class="text-gray-400 hover:text-gray-600"><i data-lucide="plus" class="w-4 h-4"></i></button>
+          </div>
+
+          <a href="#" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-amber-500 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-086</span>
+              <span class="text-xs">🟠</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Non Restaurant</div>
+            <div class="text-xs text-gray-600 line-clamp-2">MPA форма — ждём подписи владельца</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">Account</span>
+              <div class="w-4 h-4 rounded-full bg-gradient-to-br from-pink-500 to-rose-500 text-white text-[8px] font-semibold flex items-center justify-center">LV</div>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 mb-2 border-l-4 border-yellow-400 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-078</span>
+              <span class="text-xs">🟡</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Navat Lounge</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Отправили PDF — ждём подтверждения что получил</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">Statement</span>
+              <div class="w-4 h-4 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 text-white text-[8px] font-semibold flex items-center justify-center">DP</div>
+            </div>
+          </a>
+
+          <a href="#" class="block bg-white rounded-md p-3 border-l-4 border-green-400 hover:shadow-sm">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-071</span>
+              <span class="text-xs">🟢</span>
+            </div>
+            <div class="text-sm font-medium mb-1">Osh Restaurant</div>
+            <div class="text-xs text-gray-600 line-clamp-2">Уточняем банковские реквизиты</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="bg-gray-100 px-1.5 py-0.5 rounded text-gray-500">Billing</span>
+              <div class="w-4 h-4 rounded-full bg-gradient-to-br from-pink-500 to-rose-500 text-white text-[8px] font-semibold flex items-center justify-center">LV</div>
+            </div>
+          </a>
+        </div>
+
+        <!-- Column: Closed Today -->
+        <div class="bg-gray-100 rounded-lg p-3 kanban-col">
+          <div class="flex items-center justify-between mb-3 px-1">
+            <div class="flex items-center gap-2">
+              <div class="w-2 h-2 bg-emerald-500 rounded-full"></div>
+              <span class="font-semibold text-sm">Закрыто сегодня</span>
+              <span class="text-xs text-gray-500">17</span>
+            </div>
+          </div>
+
+          <div class="block bg-white/70 rounded-md p-3 mb-2 border-l-4 border-emerald-400 opacity-80">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-089</span>
+              <span class="text-xs">🟡</span>
+            </div>
+            <div class="text-sm font-medium mb-1 line-through text-gray-500">KEBAB USA</div>
+            <div class="text-xs text-gray-500 line-clamp-1">Замена принтера — отправили новый</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="text-emerald-600">✓ Закрыт · 12:42</span>
+              <div class="w-4 h-4 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 text-white text-[8px] font-semibold flex items-center justify-center">DP</div>
+            </div>
+          </div>
+
+          <div class="block bg-white/70 rounded-md p-3 mb-2 border-l-4 border-emerald-400 opacity-80">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-088</span>
+              <span class="text-xs">🟡</span>
+            </div>
+            <div class="text-sm font-medium mb-1 line-through text-gray-500">Samarkand</div>
+            <div class="text-xs text-gray-500 line-clamp-1">🤖 Бот объяснил как добавить сотрудника</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="text-emerald-600">✓ AI · 12:21</span>
+              <span>🤖</span>
+            </div>
+          </div>
+
+          <div class="block bg-white/70 rounded-md p-3 mb-2 border-l-4 border-emerald-400 opacity-80">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-xs font-mono font-semibold text-gray-600">T-084</span>
+              <span class="text-xs">🟡</span>
+            </div>
+            <div class="text-sm font-medium mb-1 line-through text-gray-500">INF-073</div>
+            <div class="text-xs text-gray-500 line-clamp-1">🤖 Вопрос по настройке чека</div>
+            <div class="flex items-center justify-between mt-2 text-[10px]">
+              <span class="text-emerald-600">✓ AI · 11:30</span>
+              <span>🤖</span>
+            </div>
+          </div>
+
+          <div class="text-center py-2">
+            <a href="#" class="text-xs text-blue-600 hover:underline">Показать ещё 14 →</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>lucide.createIcons();</script>
+</body>
+</html>

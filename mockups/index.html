@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Дашборд · Infinity Pay Desk</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+<style>
+  body { font-family: 'Inter', -apple-system, sans-serif; }
+  .sidebar-link.active { background: #EFF6FF; color: #2563EB; border-left: 3px solid #2563EB; padding-left: 13px; }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+
+<div class="flex min-h-screen">
+
+  <!-- ═══ SIDEBAR ═══ -->
+  <aside class="w-60 bg-white border-r border-gray-200 flex flex-col">
+    <div class="h-14 px-5 flex items-center gap-2 border-b border-gray-200">
+      <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">IP</div>
+      <div>
+        <div class="text-sm font-semibold leading-tight">Infinity Desk</div>
+        <div class="text-[10px] text-gray-500 leading-tight">Infinity Pay Inc.</div>
+      </div>
+    </div>
+    <nav class="flex-1 py-4 text-sm">
+      <a href="index.html" class="sidebar-link active flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50">
+        <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Дашборд
+      </a>
+      <a href="tickets.html" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50">
+        <i data-lucide="ticket" class="w-4 h-4"></i> Тикеты
+        <span class="ml-auto bg-red-100 text-red-600 text-[10px] px-1.5 py-0.5 rounded-full font-semibold">23</span>
+      </a>
+      <a href="merchants.html" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50">
+        <i data-lucide="store" class="w-4 h-4"></i> Мерчанты
+        <span class="ml-auto text-[10px] text-gray-400">152</span>
+      </a>
+      <a href="reports.html" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50">
+        <i data-lucide="bar-chart-3" class="w-4 h-4"></i> Отчёты
+      </a>
+      <a href="#" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50">
+        <i data-lucide="users" class="w-4 h-4"></i> Агенты
+      </a>
+      <a href="#" class="sidebar-link flex items-center gap-3 px-4 py-2 text-gray-600 hover:bg-gray-50">
+        <i data-lucide="settings" class="w-4 h-4"></i> Настройки
+      </a>
+    </nav>
+    <div class="p-4 border-t border-gray-200">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-pink-500 text-white flex items-center justify-center text-xs font-semibold">SR</div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium truncate">Shams Rozikov</div>
+          <div class="text-[10px] text-gray-500">ISO Admin</div>
+        </div>
+        <button class="text-gray-400 hover:text-gray-600"><i data-lucide="log-out" class="w-4 h-4"></i></button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ═══ MAIN ═══ -->
+  <main class="flex-1 flex flex-col min-w-0">
+    <!-- Top bar -->
+    <header class="h-14 bg-white border-b border-gray-200 px-6 flex items-center gap-4">
+      <div class="flex-1 max-w-md relative">
+        <i data-lucide="search" class="w-4 h-4 text-gray-400 absolute left-3 top-2.5"></i>
+        <input type="text" placeholder="Поиск мерчанта, тикета, кода..." class="w-full pl-9 pr-3 py-2 text-sm border border-gray-200 rounded-md focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 bg-gray-50">
+      </div>
+      <button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center gap-1.5">
+        <i data-lucide="plus" class="w-4 h-4"></i> Новый мерчант
+      </button>
+      <button class="relative p-2 text-gray-500 hover:text-gray-700">
+        <i data-lucide="bell" class="w-5 h-5"></i>
+        <span class="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full"></span>
+      </button>
+    </header>
+
+    <!-- Content -->
+    <div class="flex-1 p-6 overflow-auto">
+      <div class="flex items-baseline justify-between mb-6">
+        <div>
+          <h1 class="text-2xl font-bold">Доброе утро, Shams 👋</h1>
+          <p class="text-sm text-gray-500 mt-1">Пятница, 17 апреля · Вот что происходит сегодня</p>
+        </div>
+        <div class="flex gap-2">
+          <button class="px-3 py-1.5 text-sm border border-gray-200 rounded-md bg-white hover:bg-gray-50">Сегодня</button>
+          <button class="px-3 py-1.5 text-sm border border-gray-200 rounded-md bg-white hover:bg-gray-50">Неделя</button>
+          <button class="px-3 py-1.5 text-sm border border-gray-200 rounded-md bg-white hover:bg-gray-50">Месяц</button>
+        </div>
+      </div>
+
+      <!-- KPI Cards -->
+      <div class="grid grid-cols-4 gap-4 mb-6">
+        <div class="bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-xs font-medium text-gray-500 uppercase tracking-wide">Открытых тикетов</span>
+            <div class="w-8 h-8 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center">
+              <i data-lucide="inbox" class="w-4 h-4"></i>
+            </div>
+          </div>
+          <div class="text-3xl font-bold">23</div>
+          <div class="text-xs text-gray-500 mt-2 flex items-center gap-1">
+            <i data-lucide="trending-down" class="w-3 h-3 text-emerald-600"></i>
+            <span class="text-emerald-600 font-medium">−12%</span> от вчера
+          </div>
+        </div>
+
+        <div class="bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-xs font-medium text-gray-500 uppercase tracking-wide">Закрыто сегодня</span>
+            <div class="w-8 h-8 bg-emerald-50 text-emerald-600 rounded-lg flex items-center justify-center">
+              <i data-lucide="check-check" class="w-4 h-4"></i>
+            </div>
+          </div>
+          <div class="text-3xl font-bold">17</div>
+          <div class="text-xs text-gray-500 mt-2"><span class="text-emerald-600 font-medium">8</span> ботом · <span class="text-blue-600 font-medium">9</span> агентами</div>
+        </div>
+
+        <div class="bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-xs font-medium text-gray-500 uppercase tracking-wide">🔴 Urgent</span>
+            <div class="w-8 h-8 bg-red-50 text-red-600 rounded-lg flex items-center justify-center">
+              <i data-lucide="alert-triangle" class="w-4 h-4"></i>
+            </div>
+          </div>
+          <div class="text-3xl font-bold text-red-600">3</div>
+          <div class="text-xs text-gray-500 mt-2">требуют ответа &lt; 1ч</div>
+        </div>
+
+        <div class="bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-3">
+            <span class="text-xs font-medium text-gray-500 uppercase tracking-wide">Активных мерчантов</span>
+            <div class="w-8 h-8 bg-purple-50 text-purple-600 rounded-lg flex items-center justify-center">
+              <i data-lucide="store" class="w-4 h-4"></i>
+            </div>
+          </div>
+          <div class="text-3xl font-bold">147<span class="text-base text-gray-400">/152</span></div>
+          <div class="text-xs text-gray-500 mt-2">5 неактив &gt; 14 дней</div>
+        </div>
+      </div>
+
+      <!-- Main grid -->
+      <div class="grid grid-cols-3 gap-4 mb-6">
+
+        <!-- Chart -->
+        <div class="col-span-2 bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold">Обращения за последние 7 дней</h2>
+            <div class="flex items-center gap-3 text-xs">
+              <div class="flex items-center gap-1.5"><div class="w-2 h-2 bg-blue-500 rounded-full"></div>Всего</div>
+              <div class="flex items-center gap-1.5"><div class="w-2 h-2 bg-emerald-500 rounded-full"></div>Ботом</div>
+              <div class="flex items-center gap-1.5"><div class="w-2 h-2 bg-amber-500 rounded-full"></div>Эскалации</div>
+            </div>
+          </div>
+          <canvas id="chart-7d" height="240"></canvas>
+        </div>
+
+        <!-- Top agents -->
+        <div class="bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold">Топ агентов · Неделя</h2>
+            <a href="reports.html" class="text-xs text-blue-600 hover:underline">Все →</a>
+          </div>
+          <div class="space-y-3">
+            <div class="flex items-center gap-3">
+              <div class="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-cyan-500 text-white text-xs font-semibold flex items-center justify-center">DP</div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium">Daler POS</div>
+                <div class="text-[10px] text-gray-500">Операционный менеджер</div>
+              </div>
+              <div class="text-right">
+                <div class="text-sm font-semibold">34</div>
+                <div class="text-[10px] text-gray-500">закрыто</div>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <div class="w-7 h-7 rounded-full bg-gradient-to-br from-pink-500 to-rose-500 text-white text-xs font-semibold flex items-center justify-center">LV</div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium">Laziza</div>
+                <div class="text-[10px] text-gray-500">MPA / документы</div>
+              </div>
+              <div class="text-right">
+                <div class="text-sm font-semibold">27</div>
+                <div class="text-[10px] text-gray-500">закрыто</div>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <div class="w-7 h-7 rounded-full bg-gradient-to-br from-amber-500 to-orange-500 text-white text-xs font-semibold flex items-center justify-center">FR</div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium">Farik</div>
+                <div class="text-[10px] text-gray-500">Агент</div>
+              </div>
+              <div class="text-right">
+                <div class="text-sm font-semibold">19</div>
+                <div class="text-[10px] text-gray-500">закрыто</div>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <div class="w-7 h-7 rounded-full bg-gradient-to-br from-emerald-500 to-teal-500 text-white text-xs font-semibold flex items-center justify-center">AO</div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium">Andrew O.</div>
+                <div class="text-[10px] text-gray-500">Агент · Ohio</div>
+              </div>
+              <div class="text-right">
+                <div class="text-sm font-semibold">12</div>
+                <div class="text-[10px] text-gray-500">закрыто</div>
+              </div>
+            </div>
+            <div class="flex items-center gap-3">
+              <div class="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-purple-500 text-white text-xs font-semibold flex items-center justify-center">NK</div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium">Nick</div>
+                <div class="text-[10px] text-gray-500">Агент · Florida</div>
+              </div>
+              <div class="text-right">
+                <div class="text-sm font-semibold">9</div>
+                <div class="text-[10px] text-gray-500">закрыто</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Two columns: recent + urgent -->
+      <div class="grid grid-cols-3 gap-4">
+
+        <!-- Recent activity -->
+        <div class="col-span-2 bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold">Недавняя активность</h2>
+            <a href="tickets.html" class="text-xs text-blue-600 hover:underline">Все тикеты →</a>
+          </div>
+          <div class="space-y-1">
+            <div class="flex items-center gap-3 py-2 border-b border-gray-100">
+              <div class="w-1.5 h-1.5 rounded-full bg-emerald-500"></div>
+              <span class="text-xs text-gray-500 w-12">12:42</span>
+              <span class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded">T-089</span>
+              <span class="text-sm flex-1 truncate">Daler закрыл тикет · KEBAB USA — замена принтера</span>
+              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">Closed</span>
+            </div>
+            <div class="flex items-center gap-3 py-2 border-b border-gray-100">
+              <div class="w-1.5 h-1.5 rounded-full bg-red-500"></div>
+              <span class="text-xs text-gray-500 w-12">12:38</span>
+              <span class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded">T-091</span>
+              <span class="text-sm flex-1 truncate">🔴 Urgent — Plov Point: терминал не работает, очередь клиентов</span>
+              <span class="text-[10px] text-red-600 bg-red-50 px-1.5 py-0.5 rounded">Open</span>
+            </div>
+            <div class="flex items-center gap-3 py-2 border-b border-gray-100">
+              <div class="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+              <span class="text-xs text-gray-500 w-12">12:21</span>
+              <span class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded">T-088</span>
+              <span class="text-sm flex-1 truncate">🤖 Бот решил — Samarkand: как добавить сотрудника в Clover</span>
+              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">AI solved</span>
+            </div>
+            <div class="flex items-center gap-3 py-2 border-b border-gray-100">
+              <div class="w-1.5 h-1.5 rounded-full bg-amber-500"></div>
+              <span class="text-xs text-gray-500 w-12">11:57</span>
+              <span class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded">T-086</span>
+              <span class="text-sm flex-1 truncate">Laziza — Non Restaurant: MPA форма ждёт подписи</span>
+              <span class="text-[10px] text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">Waiting</span>
+            </div>
+            <div class="flex items-center gap-3 py-2 border-b border-gray-100">
+              <div class="w-1.5 h-1.5 rounded-full bg-indigo-500"></div>
+              <span class="text-xs text-gray-500 w-12">11:43</span>
+              <span class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded">T-085</span>
+              <span class="text-sm flex-1 truncate">Farik взял в работу — Chaikhana Navat: выписка за март</span>
+              <span class="text-[10px] text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded">In progress</span>
+            </div>
+            <div class="flex items-center gap-3 py-2 border-b border-gray-100">
+              <div class="w-1.5 h-1.5 rounded-full bg-blue-500"></div>
+              <span class="text-xs text-gray-500 w-12">11:30</span>
+              <span class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded">T-084</span>
+              <span class="text-sm flex-1 truncate">🤖 Бот решил — INF-073: вопрос по настройке чека</span>
+              <span class="text-[10px] text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">AI solved</span>
+            </div>
+            <div class="flex items-center gap-3 py-2">
+              <div class="w-1.5 h-1.5 rounded-full bg-purple-500"></div>
+              <span class="text-xs text-gray-500 w-12">11:05</span>
+              <span class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded">T-083</span>
+              <span class="text-sm flex-1 truncate">Andrew создал тикет — Mirzo Shashlik (новый мерчант): установка терминала</span>
+              <span class="text-[10px] text-purple-600 bg-purple-50 px-1.5 py-0.5 rounded">New</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Urgent tickets -->
+        <div class="bg-white rounded-lg border border-gray-200 p-5">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold flex items-center gap-2">🔴 Требуют внимания</h2>
+          </div>
+          <div class="space-y-3">
+            <a href="ticket.html" class="block p-3 border border-red-200 bg-red-50 rounded-lg hover:bg-red-100">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs font-mono font-semibold">T-091</span>
+                <span class="text-[10px] text-red-700">38 мин назад</span>
+              </div>
+              <div class="text-sm font-medium">Plov Point</div>
+              <div class="text-xs text-gray-600 mt-0.5 truncate">Терминал не работает, очередь клиентов</div>
+              <div class="text-[10px] text-gray-500 mt-2">Hardware · Не назначен</div>
+            </a>
+            <a href="#" class="block p-3 border border-red-200 bg-red-50 rounded-lg hover:bg-red-100">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs font-mono font-semibold">T-079</span>
+                <span class="text-[10px] text-red-700">2ч назад</span>
+              </div>
+              <div class="text-sm font-medium">Samarkand Grill</div>
+              <div class="text-xs text-gray-600 mt-0.5 truncate">Chargeback $340 — срочно связаться</div>
+              <div class="text-[10px] text-gray-500 mt-2">Chargeback · Daler</div>
+            </a>
+            <a href="#" class="block p-3 border border-red-200 bg-red-50 rounded-lg hover:bg-red-100">
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs font-mono font-semibold">T-067</span>
+                <span class="text-[10px] text-red-700">5ч назад</span>
+              </div>
+              <div class="text-sm font-medium">KEBAB USA</div>
+              <div class="text-xs text-gray-600 mt-0.5 truncate">Подозрительная транзакция $8,200</div>
+              <div class="text-[10px] text-gray-500 mt-2">Fraud · Daler</div>
+            </a>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<script>
+lucide.createIcons();
+
+// 7-day chart
+const ctx = document.getElementById('chart-7d');
+new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: ['Пн 11', 'Вт 12', 'Ср 13', 'Чт 14', 'Пт 15', 'Сб 16', 'Вс 17'],
+    datasets: [
+      { label: 'Всего', data: [42, 38, 51, 47, 55, 28, 40], borderColor: '#3B82F6', backgroundColor: 'rgba(59,130,246,0.1)', tension: 0.35, fill: true, borderWidth: 2 },
+      { label: 'Ботом', data: [31, 29, 38, 34, 41, 20, 31], borderColor: '#10B981', backgroundColor: 'transparent', tension: 0.35, borderWidth: 2 },
+      { label: 'Эскалации', data: [11, 9, 13, 13, 14, 8, 9], borderColor: '#F59E0B', backgroundColor: 'transparent', tension: 0.35, borderWidth: 2 }
+    ]
+  },
+  options: {
+    responsive: true, maintainAspectRatio: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      y: { grid: { color: '#F3F4F6' }, ticks: { color: '#9CA3AF', font: { size: 11 } } },
+      x: { grid: { display: false }, ticks: { color: '#9CA3AF', font: { size: 11 } } }
+    }
+  }
+});
+</script>
+</body>
+</html>
