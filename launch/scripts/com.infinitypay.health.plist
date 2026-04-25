@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS launchd job для запуска health-checker'а каждые 15 минут.
+
+  Установка:
+    1. cp com.infinitypay.health.plist ~/Library/LaunchAgents/
+    2. launchctl load ~/Library/LaunchAgents/com.infinitypay.health.plist
+    3. launchctl start com.infinitypay.health
+    4. tail -f /tmp/infinity-health.log  # смотреть результаты
+
+  Проверить статус:
+    launchctl list | grep infinitypay
+
+  Остановить:
+    launchctl unload ~/Library/LaunchAgents/com.infinitypay.health.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.infinitypay.health</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/shams/Library/Application Support/InfinityPay/health_monitor.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>TELEGRAM_BOT_TOKEN</key>
+        <string>8602300782:AAG24wEA60pRi30GN-ih_Q3msXiMBHRy6rc</string>
+        <key>TELEGRAM_OWNER_CHAT_ID</key>
+        <string>8427036826</string>
+        <key>DASHBOARD_URL</key>
+        <string>https://infinity-pay-dashboard-production.up.railway.app</string>
+        <key>HEALTH_QUIET</key>
+        <string>1</string>
+    </dict>
+
+    <!-- Запускать каждые 15 минут (900 сек) -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <!-- Запустить сразу при загрузке -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Логи -->
+    <key>StandardOutPath</key>
+    <string>/tmp/infinity-health.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/infinity-health.err</string>
+</dict>
+</plist>
