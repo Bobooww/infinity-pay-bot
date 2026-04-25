@@ -19,15 +19,23 @@
 
 ### 1. ✅ Базовая инфраструктура — УЖЕ РАБОТАЕТ
 
-| Что | Статус | Кто проверяет |
+| Что | Статус | Где живёт |
 |---|---|---|
-| Telegram бот @InfinityPaySupportBot | ✅ live (Railway) | Shams |
-| Дашборд (HTTPS, auth, CSRF, CSP) | ✅ live | Shams |
-| 153 мерчанта в БД с INF-XXXX кодами | ✅ | Shams |
-| Auto-router тикетов на support1/support2 | ✅ | Shams |
-| AI Haiku → Sonnet (только что апгрейднул) | ✅ deployed | Shams |
-| Долгая память мерчантов 30 дней | ✅ | Shams |
-| Голосовые через Whisper | ✅ | Shams |
+| Telegram бот @InfinityPaySupportBot | ✅ live | webhook → `infinity-pay-dashboard` |
+| Дашборд (HTTPS, auth, CSRF, CSP) | ✅ live | `infinity-pay-dashboard-production.up.railway.app` |
+| Claude tool-use агент (12 Clover-tools) | ✅ live | `infinity-pay-dashboard/src/bot/` |
+| Conversation history в Postgres | ✅ live | таблица `bot_conversations` |
+| Multimodal (фото) поддержка | ✅ live | через `extractPayload` |
+| 153 мерчанта в БД с INF-XXXX кодами | ✅ | таблица `merchants` |
+| Auto-router тикетов на support1/support2 | ✅ live | `bot/router.js` |
+| Голосовые через Whisper | ✅ live | `bot/media.js` |
+| Multi-language (RU/EN/TJ/UZ/ES) | ✅ live | системный промпт агента |
+| Owner Telegram-бот для Shams (broadcast) | ✅ live | `bot/systemPrompts.js` ownerPrompt |
+| Guardian (anti-spam, лимиты) | ✅ live | `bot/guardian.js` |
+| Clover OAuth (production env) | ✅ настроен | `CLOVER_ENV=production` (ждёт verification) |
+
+**Важно:** старый `bot.py` (Python, polling) — **deprecated, остановлен** на Railway 2026-04-24.
+Активный бот = Node.js webhook handler в дашборде. Не редактируй `bot.py` — изменения никуда не дойдут.
 
 ### 2. 🟡 Что осталось (TODO)
 
@@ -62,11 +70,7 @@
   - **Время:** 10 минут
   - **Зачем:** если кто-то забудет пароль — `forgot-password` сработает
 
-- [ ] **Clover Sandbox** (пока ждём prod верификацию)
-  - Кто: Shams + я (могу настроить)
-  - Что: получить sandbox creds на https://www.clover.com/developer-home → подставить в Railway
-  - Sandbox даёт сразу, без верификации
-  - **Время:** 30 минут
+- [x] ~~Clover Sandbox~~ — `CLOVER_ENV=production` уже настроен. Clover-tools работают, OAuth готов. Ждём только верификацию чтобы подключать реальных мерчантов.
 
 #### C. Мерчанты
 

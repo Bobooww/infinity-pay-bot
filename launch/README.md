@@ -12,7 +12,7 @@
 | **[LAUNCH_CHECKLIST.md](LAUNCH_CHECKLIST.md)** | Shams | **Прямо сейчас.** Полный список что осталось сделать с владельцами и сроками |
 | [TEAM_QUICKSTART.md](TEAM_QUICKSTART.md) | Daler, Laziza, support1, support2 | После того как они получили email + пароль |
 | [AGENT_FIELD_KIT.md](AGENT_FIELD_KIT.md) | Andrew, Nick, A U, Behruz | Перед первым cold call / визитом к мерчанту |
-| [BUSINESS_CARD.html](BUSINESS_CARD.html) | Andrew, Nick (потом другие агенты) | Открыть в Chrome → Cmd+P → PDF → в типографию |
+| [BUSINESS_CARD.html](BUSINESS_CARD.html) + [BUSINESS_CARD.pdf](BUSINESS_CARD.pdf) | Andrew, Nick (потом другие агенты) | PDF готов — отправь в типографию (VistaPrint/Moo, $30-40 за 250 шт) |
 | [MERCHANT_BROADCAST.md](MERCHANT_BROADCAST.md) | Daler (он рассылает) | Перед массовой рассылкой 152 мерчантам |
 | [E2E_TEST_PLAN.md](E2E_TEST_PLAN.md) | Shams | Перед каждой массовой рассылкой / после деплоя |
 

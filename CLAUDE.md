@@ -1,79 +1,70 @@
 # CLAUDE.md — Infinity Pay Telegram Support Bot
 
-## Project Overview
-Infinity Pay Telegram Support Bot v2 — customer support bot for Infinity Pay Inc.
-Merchants write to the bot on Telegram, AI (Claude) analyzes and classifies the issue,
-creates a ClickUp ticket, and routes it to the support team.
+## ⚠️ ВАЖНО: ЭТОТ БОТ DEPRECATED (2026-04-24)
+
+`bot.py` — **legacy** Python implementation. Сейчас активный бот — это **`infinity-pay-dashboard`** (Node.js, webhook mode).
+
+**Активный бот:**
+- Repo: `~/Documents/brain/infinity-pay-dashboard/`
+- Endpoint: `https://infinity-pay-dashboard-production.up.railway.app/bot/webhook`
+- Архитектура: Claude tool-use (12 tools), conversation history в Postgres, multimodal (фото)
+- Файлы: `src/bot/agent.js` (merchant), `src/bot/webhook.js` (роутинг), `src/bot/tools.js` (Clover tools)
+
+**Этот сервис (`infinity-pay-bot`) на Railway остановлен** чтобы не было webhook conflicts.
+
+Если когда-нибудь нужно будет вернуть `bot.py` в работу:
+1. Удалить webhook у бота: `curl https://api.telegram.org/bot<TOKEN>/deleteWebhook`
+2. Запустить `bot.py` (polling вернётся в работу)
+3. **НО:** дашборд тогда не будет получать сообщения. Можно использовать только один из двух одновременно.
+
+---
+
+## Project Overview (legacy)
+
+Infinity Pay Telegram Support Bot v2 — оригинальный Python implementation бота.
+Использовался до перехода на Node.js дашборд с Claude tool-use архитектурой.
 
 ## Tech Stack
 - **Language:** Python 3.11
-- **Telegram:** python-telegram-bot 20.7 (with job-queue)
-- **AI:** Anthropic Claude (Haiku for simple, Sonnet for complex), OpenAI Whisper (voice)
+- **Telegram:** python-telegram-bot 20.7 (polling mode)
+- **AI:** Anthropic Claude (Haiku + Sonnet hybrid)
 - **Task management:** ClickUp API v2
-- **Deployment:** Railway (auto-deploy from GitHub main branch)
-- **Container:** Docker (python:3.11-slim)
+- **Voice:** OpenAI Whisper
 
-## File Structure
+## Структура файлов
 ```
-bot.py              — main bot file (all logic in one file)
-clickup_ids.json    — ClickUp custom field IDs mapping
+bot.py              — main bot file (~3500 lines)
+clickup_ids.json    — ClickUp custom field IDs
 requirements.txt    — Python dependencies
 Dockerfile          — Docker container config
 README.md           — project README
-.gitignore          — git ignore rules
 CLAUDE.md           — this file
+launch/             — launch documentation pack (актуально)
+mockups/            — visual prototype mockups (актуально)
 ```
 
-## Key Features (v2)
-1. **Hybrid AI:** Haiku for simple questions → Sonnet for complex ones
-2. **Smart categories:** Terminal, Payment, Chargeback, Statement, Billing, Account, Software, Hardware, Fraud, Compliance, General (no "Other")
-3. **Priorities:** Urgent 🔴 / High 🟠 / Normal 🟡 / Low 🟢
-4. **Sessions:** groups messages into one ticket (10 min timeout)
-5. **Voice messages:** transcribed via Whisper API
-6. **Support group:** tickets duplicated to TG support group
-7. **Agent/ISO login:** /login + secret code (IAMAGENT, ISO-MASTER)
-8. **ClickUp sync:** ticket status updates → user notifications
-9. **FAQ cache:** caches common answers (24h TTL, max 200)
-10. **Anti-spam:** max 10 messages per 60 seconds
+## Что осталось актуальным
 
-## Environment Variables (Railway)
-```
-TELEGRAM_BOT_TOKEN      — Telegram bot token
-CLAUDE_API_KEY          — Anthropic API key
-CLICKUP_API_TOKEN       — ClickUp API token
-CLICKUP_LIST_TICKETS_ID — ClickUp list ID for tickets
-CLICKUP_LIST_MERCHANTS_ID — ClickUp list ID for merchants
-SUPPORT_GROUP_CHAT_ID   — Telegram group chat ID for support team
-OPENAI_API_KEY          — OpenAI API key (for Whisper voice transcription)
-```
+**В этом repo:**
+- `launch/` — все launch-материалы (broadcasts, training, scripts, business cards)
+- `mockups/` — кликабельный визуальный прототип дашборда
 
-## Bot Commands
-- `/start` — welcome message, merchant identification
-- `/login` — agent/ISO login prompt
-- `/stats` — bot statistics (agents only)
-- `/recent` — recent tickets (agents only)
+Эти артефакты независимы от bot.py и используются как-есть.
 
-## How It Works
-1. Merchant sends message → bot identifies merchant by TG ID via ClickUp
-2. AI (Haiku) classifies: category + priority + summary
-3. If complex → escalates to Sonnet for deeper analysis
-4. Creates ClickUp ticket with custom fields (source, merchant, MID, category, priority, channel, phone)
-5. Posts ticket summary to TG support group
-6. Periodic job checks ClickUp for status changes → notifies merchant
+## История изменений
 
-## Development Notes
-- All code is in a single `bot.py` file (~1280 lines)
-- State is stored in-memory (dicts), no database
-- Bot uses polling mode (not webhooks)
-- Cyrillic comments in bot.py — UI text is in Russian
-- ClickUp custom field IDs are hardcoded in bot.py AND in clickup_ids.json
-- Railway auto-deploys on every push to main — be careful with commits
+- **2026-04-24** — bot.py deprecated, дашборд стал live. Сервис остановлен на Railway.
+- **2026-04-24** — Apr 17 (мой апгрейд): добавил intelligent intent routing, 30-day memory persistence. **Никогда не дошло до прода** — webhook был на дашборде.
+- **2026-04-19** — Dashboard security hardening + UI completion
+- **2026-04-18** — Long-term merchant memory architecture
+- **2026-04-15** — Initial Python bot build
 
-## Known Issues
-- bot.py on GitHub has double-encoded UTF-8 (Cyrillic text appears as mojibake) — cosmetic only, bot works fine
-- No persistent storage — restart clears sessions, FAQ cache, stats
+## Если нужно что-то улучшить в боте
 
-## Important: Editing bot.py
-- The file is ~1280 lines — when editing on GitHub web editor, CodeMirror virtualizes content
-- Always verify syntax before committing (missing colons, brackets, etc.)
-- Railway will crash-loop on SyntaxError — check deploy logs after every commit
+**Не редактируй bot.py** — он не запущен. Иди в `infinity-pay-dashboard/src/bot/`:
+- `agent.js` — главная логика merchant agent
+- `webhook.js` — entry point, role routing
+- `tools.js` — Clover tools (sales, menu, terminals)
+- `agentTools.js` — tools для саппорт-агентов
+- `systemPrompts.js` — промпты для разных ролей
+- `guardian.js` — anti-spam, daily limits, fragmentation detection
